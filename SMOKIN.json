@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "smokin",
+  "version": "0.1.0",
+  "tagline": "Grillin builds the plan. Smokin runs it.",
+  "description": "An idempotent tick that runs a Grillin-shaped plan directory from disk. It dispatches ready tasks across heterogeneous agent CLIs, re-runs each task's own done-command as an independent second hand, and regenerates a human-readable surface — then exits. There is no long-running orchestrator process.",
+
+  "readThisIfYouAreAnAgent": {
+    "whatThisRepoIs": "A runtime, not a method. The method is Grillin (separate repo). This repo contains three executables and the contract they implement.",
+    "theOneInvariant": "Every fact the orchestrator needs is a file inside the plan directory. Nothing is held in a process, a session, or a conversation. If you cannot reconstruct it from the plan directory, it does not exist.",
+    "howToOperateIt": ["smokin doctor <plan>", "smokin tick <plan>", "repeat until exit 0 (complete) or exit 3 (stuck)"],
+    "exitCodes": {"0": "plan complete — every task verified", "1": "work in flight, tick again", "2": "not a plan directory", "3": "stuck — nothing running and nothing ready"},
+    "doNot": [
+      "Do NOT wait on an agent's lifecycle state instead of its receipt. On a real machine `herdr agent list` reported two bare login shells as idle claude agents; a false idle is indistinguishable from a finished worker.",
+      "Do NOT read a pane's screen to detect completion. A TUI on the alternate screen never reaches scrollback. Watch the filesystem.",
+      "Do NOT call an agent binary from a done-command. The gate then tests whether the tool is installed, not whether the work is finished.",
+      "Do NOT edit PROGRESS.md or STATUS.json. Both are regenerated every tick.",
+      "Do NOT treat RECEIPT.json as proof of completion. It is a claim. VERDICT.json is the check."
+    ]
+  },
+
+  "theOneIdea": {
+    "claim": "There is no long-running orchestrator process.",
+    "why": "Grillin principle 14 says assume amnesia — anything living only in a conversation is already gone. Grillin's own SCALING.json confesses the cost of its default substrate: 'fleet state lives in the orchestrator's context and dies with it'. Nothing made principle 14 true for a RUNNING fleet. This does.",
+    "consequence": "Compaction, Ctrl-C, an SSH drop, `herdr server stop` and closing the terminal are all no-ops on the plan.",
+    "proof": "tests/run-tests.sh — kill -9 a worker with no orchestrator alive, then recover the identical frontier from a separate later process."
+  },
+
+  "loop": [
+    {"step": "reap", "does": "any dispatch record past its budget with no receipt is synthesised as terminal:reaped. A missing receipt is a result, not an absence."},
+    {"step": "drain", "does": "claim spool pointers by rename(inbox->done) BEFORE acting. Acting first leaves a window where a crash re-dispatches dependants onto still-running copies."},
+    {"step": "gate", "does": "re-run each finished task's own `## Done means` command and write VERDICT.json. A second hand — principle 8 one level down."},
+    {"step": "dispatch", "does": "launch every ready task, in-process by default, in a pane only under a declared clause."},
+    {"step": "render", "does": "regenerate STATUS.json from files, then PROGRESS.md from STATUS.json only."}
+  ],
+
+  "receiptVsVerdict": {
+    "RECEIPT.json": "the agent's CLAIM, written by its wrapper or a native hook",
+    "VERDICT.json": "the project's verdict, written by the tick re-running the task's own done-command",
+    "rule": "A receipt may be a PRECONDITION of a gate. It may never BE the gate — a receipt plus a two-line findings file passes `test -f` with zero real work done.",
+    "surfacedAs": "PROGRESS.md renders '● verified' and '◑ claimed, ungated' differently, and says why."
+  },
+
+  "routing": {
+    "rule": "first match wins",
+    "clauses": [
+      {"n": 1, "if": "Interrupt: yes", "then": "pane", "referent": "author declaration"},
+      {"n": 2, "if": "Watch: yes", "then": "pane", "referent": "author declaration — pure taste, declared where a reader can argue with it"},
+      {"n": 3, "if": "Type: ASK", "then": "pane", "referent": "external — an existing Grillin typed field"},
+      {"n": 4, "if": "Budget > 900", "then": "pane", "referent": "author declaration"},
+      {"n": 5, "if": "runtime has no headless mode", "then": "pane", "referent": "external — read from runtimes.json"},
+      {"n": 6, "if": "otherwise", "then": "inproc"}
+    ],
+    "counterIntuitive": "You do not open a pane to get parallelism. Parallelism is free in-process. A pane is bought with a screen and paid for in human review capacity, which is the constraint no tool in the prior art solved.",
+    "honestLimit": "Only clauses 3 and 5 have an external referent. A check on the others proves self-consistency, not truth. Dispatch is author-chosen inside a checked envelope."
+  },
+
+  "presenter": {
+    "STATUS.json": "machine truth, derived only from files on disk, regenerated every tick",
+    "PROGRESS.md": "the human surface, rendered ONLY from STATUS.json",
+    "rule": "The presenter may not re-derive a single fact. It reads the object and narrates it — the same rule as Grillin's reader model, because a narrator allowed to go looking will eventually narrate something that is not true.",
+    "leadsWith": ["waiting on you", "said done, gate disagreed", "every task", "what changed this tick"],
+    "optionalAgent": "A presenter agent may read STATUS.json and nothing else, writes PROGRESS-NOTES.md never PROGRESS.md, and may never call a task done — only repeat 'verified' or 'claimed, ungated' as given."
+  },
+
+  "runtimes": {
+    "entryCondition": "can be started by a shell command, and can write a file into a directory",
+    "notRequired": ["being one of herdr's 21 agent kinds", "having a hook system"],
+    "mechanism": "a runtime is a row in .smokin/runtimes.json. The tick has no branch on runtime anywhere.",
+    "emissionPaths": [
+      {"path": "wrapper", "role": "the floor", "detail": "forks (never execs) and traps EXIT HUP TERM INT"},
+      {"path": "native hook", "role": "accelerant", "detail": "lower latency and a richer result; delete them all and Smokin still terminates"},
+      {"path": "reaper", "role": "the guarantee", "detail": "synthesises from the dispatch record"}
+    ]
+  },
+
+  "experiments": [
+    {"id": "Q2", "question": "does `herdr pane run` leave a wrapper's EXIT trap intact?", "answer": "YES", "evidence": "{\"trap\":\"fired\",\"rc\":0,\"sig\":\"EXIT\"}", "status": "CONFIRMED"},
+    {"id": "Q2b", "question": "does the trap fire when the pane is closed?", "answer": "YES, via SIGHUP", "evidence": "herdr pane close -> {\"trap\":\"fired\",\"sig\":\"HUP\"}", "status": "CONFIRMED", "note": "pane closure is recoverable, not silent loss"},
+    {"id": "Q1", "question": "does a Codewhale pane ever emit?", "answer": "YES", "evidence": "rc=129 on pane close", "status": "CONFIRMED", "note": "This REVERSES the design document, which concluded Codewhale panes have no emission path. The earlier probe never closed the pane, so it measured 'an idle TUI does not exit' and reported it as 'cannot emit'."}
+  ],
+
+  "phase8": {
+    "obligation": "Grillin phase 8 says choose the substrate by measurement, not preference. Its five measurements are COMPARATIVE — they compare Smokin against programmatic fan-out on the same real workload.",
+    "consequence": "Smokin may be declared and used. It may NOT be recommended over the default substrate until rows 1, 2 and 4 exist for a real fan-out.",
+    "whyNotFilledFromTheDemo": "The demo plan's workers are `sleep 1`. Measuring those and publishing the numbers would be measuring the fixture and calling it a measurement — the exact anti-pattern. Empty and honest beats filled and wrong.",
+    "measure": [
+      {"n": 1, "what": "effective parallelism on both, not the advertised cap", "status": "EMPTY", "closedBy": "run one real fan-out of >=5 agent tasks on each substrate and count how many were genuinely running at once"},
+      {"n": 2, "what": "wall-clock on the same real fan-out, not a synthetic benchmark", "status": "EMPTY", "closedBy": "the same job, both substrates, one host, same day"},
+      {"n": 3, "what": "time-to-detect a stalled worker", "status": "ANSWERED — structural, not benchmarked", "value": "budget_s + time to the next tick, bounded and declared per task", "versusDefault": "programmatic fan-out cannot distinguish a blocked worker from a thinking one until it times out; Grillin's own SCALING.json names this as the default substrate's first cost"},
+      {"n": 4, "what": "orchestrator tokens spent watching", "status": "EMPTY", "closedBy": "instrument a real run; structurally Smokin's watching cost is one tick invocation, but 'structurally' is not a measurement"},
+      {"n": 5, "what": "recovery cost after a context loss", "status": "ANSWERED — tested", "value": "one `smokin tick`, zero model tokens, full frontier recovered from disk", "evidence": "tests/run-tests.sh: 'killed worker is reaped, not lost' and 'a missing receipt became a result'", "versusDefault": "total loss — the fleet is still running, unaddressable, and its progress unknown until it returns or dies"}
+    ]
+  },
+
+  "honestState": {
+    "notProven": ["OpenCode dispatch end to end", "aider dispatch end to end", "Codex entirely — not installed on the development machine"],
+    "notSolved": [
+      "Correctness. Smokin proves a task ran, produced artefacts and passed a gate somebody else wrote. Whether the gate was worth running needs Grillin's uncontaminated adversarial reader.",
+      "Power-loss durability. It fsyncs, which is daemon-and-clean-reboot persistence. 'The state is in the repository' must not be read as more.",
+      "The review bottleneck. It scales linearly with pane count. Smokin makes a pane expensive and caps the count; that is a speed bump, not a fix.",
+      "Freshness. The tick is only as fresh as its last run. If nothing ticks, receipts sit in the spool and the plan is complete-but-unreaped — latency, never lost work."
+    ],
+    "paneCeiling": {"XS": 0, "S": 1, "M": 3, "L": 5, "XL": 5, "status": "provisional — an opinion from practitioner reports that review capacity binds before compute does. Marking it a floor does not make it a measurement."}
+  },
+
+  "requires": {"python3": "stdlib only", "bash": "any", "herdr": "OPTIONAL — without it panes are unavailable and everything else works"},
+  "sibling": {"name": "grillin", "answers": "is this plan operable?", "smokinAnswers": "is it running, and where is it?"}
+}
