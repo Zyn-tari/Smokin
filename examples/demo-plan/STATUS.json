@@ -1,7 +1,7 @@
 {
  "schema": "smokin.status/1",
- "run": "r59e68e",
- "at": "2026-08-05T13:16:43Z",
+ "run": "r7ecace",
+ "at": "2026-08-05T13:26:46Z",
  "plan": "~/smokin/examples/demo-plan",
  "size": "XS",
  "pane_ceiling": 0,
@@ -22,7 +22,7 @@
    "runtime": "demo",
    "dispatch": "inproc",
    "clause": "6 \u00b7 otherwise",
-   "where": 3627271,
+   "where": 3636843,
    "blocked_by": [],
    "waiting_on": [],
    "needs_human": false,
@@ -42,7 +42,7 @@
    "runtime": "demo",
    "dispatch": "inproc",
    "clause": "6 \u00b7 otherwise",
-   "where": 3627325,
+   "where": 3636860,
    "blocked_by": [
     "T1"
    ],
@@ -64,7 +64,7 @@
    "runtime": "demo",
    "dispatch": "inproc",
    "clause": "6 \u00b7 otherwise",
-   "where": 3627343,
+   "where": 3636916,
    "blocked_by": [
     "T2"
    ],

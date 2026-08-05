@@ -14,7 +14,7 @@
 
 ## Done means
 ```
-test $(wc -c < tasks/T3/FINDINGS.md) -gt 50
+test "$(cat tasks/T3/FINDINGS.md 2>/dev/null | wc -c)" -gt 50
 ```
 
 ## Do NOT
