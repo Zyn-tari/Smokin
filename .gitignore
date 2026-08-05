@@ -1,0 +1,9 @@
+examples/demo-plan/.smokin/dispatch/
+examples/demo-plan/.smokin/spool/
+examples/demo-plan/.smokin/run.json
+examples/demo-plan/.smokin/ledger.jsonl
+examples/demo-plan/.smokin/doctor.json
+examples/demo-plan/tasks/*/.smokin/
+examples/demo-plan/tasks/*/RECEIPT.json
+examples/demo-plan/tasks/*/VERDICT.json
+examples/demo-plan/tasks/*/FINDINGS.md

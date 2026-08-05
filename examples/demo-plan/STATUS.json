@@ -1,0 +1,92 @@
+{
+ "schema": "smokin.status/1",
+ "run": "r59e68e",
+ "at": "2026-08-05T13:16:43Z",
+ "plan": "~/smokin/examples/demo-plan",
+ "size": "XS",
+ "pane_ceiling": 0,
+ "counts": {
+  "verified": 2,
+  "claimed": 0,
+  "running": 0,
+  "ready": 0,
+  "blocked": 0,
+  "refuted": 1
+ },
+ "total": 3,
+ "tasks": [
+  {
+   "id": "T1",
+   "state": "verified",
+   "owner": "worker-a",
+   "runtime": "demo",
+   "dispatch": "inproc",
+   "clause": "6 \u00b7 otherwise",
+   "where": 3627271,
+   "blocked_by": [],
+   "waiting_on": [],
+   "needs_human": false,
+   "claim": "done",
+   "terminal": "ok",
+   "result": [
+    "T1 complete"
+   ],
+   "wall_s": 1.0,
+   "elapsed_s": null,
+   "budget_s": 60
+  },
+  {
+   "id": "T2",
+   "state": "verified",
+   "owner": "worker-b",
+   "runtime": "demo",
+   "dispatch": "inproc",
+   "clause": "6 \u00b7 otherwise",
+   "where": 3627325,
+   "blocked_by": [
+    "T1"
+   ],
+   "waiting_on": [],
+   "needs_human": false,
+   "claim": "done",
+   "terminal": "ok",
+   "result": [
+    "T2 complete"
+   ],
+   "wall_s": 1.0,
+   "elapsed_s": null,
+   "budget_s": 60
+  },
+  {
+   "id": "T3",
+   "state": "refuted",
+   "owner": "worker-a",
+   "runtime": "demo",
+   "dispatch": "inproc",
+   "clause": "6 \u00b7 otherwise",
+   "where": 3627343,
+   "blocked_by": [
+    "T2"
+   ],
+   "waiting_on": [],
+   "needs_human": false,
+   "claim": "done",
+   "terminal": "ok",
+   "result": [
+    "T3 complete"
+   ],
+   "wall_s": 1.0,
+   "elapsed_s": null,
+   "budget_s": 60
+  }
+ ],
+ "frontier": [],
+ "this_tick": {
+  "reaped": [],
+  "verdicted": [
+   "T3"
+  ],
+  "dispatched": [],
+  "queued": []
+ }
+}

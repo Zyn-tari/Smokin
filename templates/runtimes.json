@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "The capability table. This is the ONLY file that knows any vendor's flags.",
+    "The tick has no branch on runtime anywhere — a runtime is a row, not a code path.",
+    "",
+    "The entry condition for being a first-class Smokin runtime is: it can be started by a",
+    "shell command, and it can write a file into a directory. It is NOT 'is one of herdr's",
+    "21 kinds' and NOT 'has a hook system'. Codewhale is neither and works fine.",
+    "",
+    "{LINE} is the one-line dispatch prompt. {WT} is the plan root."
+  ],
+
+  "claude": {
+    "headless": "claude -p --permission-mode acceptEdits",
+    "pane": "claude",
+    "holds_credentials": false,
+    "hook_scope": "project-and-global",
+    "verified": "installed; headless CONFIRMED present at ~/.npm-global/bin/claude",
+    "note": "A per-pane --settings accelerant is NOT shipped: whether it merges or replaces is untested, and if it replaces it would silently disable herdr's own state hook and Grillin's awareness hooks. Open question Q3."
+  },
+
+  "codewhale": {
+    "headless": "codewhale exec --json --auto",
+    "pane": "codewhale -C {WT} --skip-onboarding",
+    "holds_credentials": true,
+    "global_config": "~/.codewhale/config.toml",
+    "hook_scope": "global-only",
+    "fixed_port": 7891,
+    "verified": "headless CONFIRMED returns {\"mode\":\"one-shot\",\"success\":true,...}; pane emission CONFIRMED by experiment Q1 — the wrapper trap fires on pane close with rc=129",
+    "note": "Not one of herdr's 21 agent kinds, so herdr cannot classify its lifecycle. Under Smokin that costs nothing: the tick never asks herdr what any agent is doing. Its global-only hooks must never carry a task id — a hook is machine-wide and would fire for every pane."
+  },
+
+  "opencode": {
+    "headless": "opencode run",
+    "pane": "opencode",
+    "holds_credentials": false,
+    "hook_scope": "none-known",
+    "verified": "installed at ~/.opencode/bin/opencode; headless flag SUSPECTED, not exercised",
+    "note": "Its SSE event stream needs a resident subscriber, which is the one thing this design refuses to depend on. Wrapper + reaper only."
+  },
+
+  "codex": {
+    "headless": "codex exec",
+    "pane": "codex",
+    "holds_credentials": true,
+    "hook_scope": "global-notify",
+    "verified": "NOT INSTALLED on this machine — every field here is SUSPECTED, from vendor docs",
+    "note": "codex is absent, so smokin doctor reports it MISSING rather than letting a gate that shells out to it exit 127 and read as a clean failure."
+  },
+
+  "aider": {
+    "headless": "aider --yes --message",
+    "pane": "aider",
+    "holds_credentials": false,
+    "hook_scope": "none",
+    "verified": "installed at ~/.local/bin/aider; untested",
+    "note": "Untested end to end. Declared so doctor reports it honestly rather than omitting it."
+  }
+}
