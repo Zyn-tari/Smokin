@@ -70,10 +70,18 @@ chk "re-ticking a finished plan is a no-op" "$(echo "$r1" | grep -c 'dispatch ')
 chk "no duplicate dispatch on re-tick"      "$(echo "$r2" | grep -c 'dispatch ')" "0"
 
 # ── 4 · two ticks racing ────────────────────────────────────────────────────
+# The invariant is NOT "the second one declines" — either may win the race.
+# It is: across both, T1 is dispatched exactly once. An earlier version of this
+# test asserted a line count and failed 1 run in 3 because a tick that wins
+# prints both "dispatch T1" and "1 in flight". A flaky test is worse than none.
 P="$LAB/lock"; newplan "$P" 60
-( "$SMOKIN" tick "$P" >/dev/null 2>&1 ) &
-out="$("$SMOKIN" tick "$P" 2>&1; true)"; wait
-chk "a second concurrent tick declines"  "$(echo "$out" | grep -cE 'another tick|dispatch |in flight')" "1"
+"$SMOKIN" tick "$P" > "$LAB/a.txt" 2>&1 &
+"$SMOKIN" tick "$P" > "$LAB/b.txt" 2>&1 &
+wait
+chk "two racing ticks dispatch exactly once" \
+    "$(cat "$LAB/a.txt" "$LAB/b.txt" | grep -c 'dispatch ')" "1"
+chk "the loser says so rather than failing" \
+    "$(cat "$LAB/a.txt" "$LAB/b.txt" | grep -c 'another tick holds the lock')" "1"
 
 # ── 5 · the emitter's mutex ─────────────────────────────────────────────────
 P="$LAB/dup"; newplan "$P" 60

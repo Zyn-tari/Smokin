@@ -2,7 +2,7 @@
 
 `███████████████████░░░░░░░░░`  **2 of 3 verified**
 
-*run `r59e68e` · size XS · rendered 2026-08-05T13:16:43Z · regenerated every tick — do not edit by hand*
+*run `r7ecace` · size XS · rendered 2026-08-05T13:26:46Z · regenerated every tick — do not edit by hand*
 
 ## ✗ Said done, gate disagreed
 
@@ -12,9 +12,9 @@
 
 | | Task | State | Owner | Where | Waiting on |
 |---|---|---|---|---|---|
-| ● | **T1** | verified 1.0s | worker-a | `3627271` | — |
-| ● | **T2** | verified 1.0s | worker-b | `3627325` | — |
-| ✗ | **T3** | REFUTED 1.0s | worker-a | `3627343` | — |
+| ● | **T1** | verified 1.0s | worker-a | `3636843` | — |
+| ● | **T2** | verified 1.0s | worker-b | `3636860` | — |
+| ✗ | **T3** | REFUTED 1.0s | worker-a | `3636916` | — |
 
 ## What changed this tick
 

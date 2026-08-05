@@ -659,10 +659,19 @@ def reset(plan: Plan, run):
         for p in list((plan.priv / d).glob("*")) if (plan.priv / d).is_dir() else []:
             p.unlink(); n += 1
     for tid in plan.tasks:
-        for f in ("RECEIPT.json", "VERDICT.json", ".smokin/emit.lock"):
+        # The output contract goes too. A task back at NOT STARTED whose
+        # FINDINGS.md is still on disk is incoherent state, and Grillin's gate
+        # says so precisely: the done-command passes before any work is done,
+        # so an orchestrator would mark unstarted work complete. Found by
+        # running validate-plan.py against this repo's own example.
+        for f in ("RECEIPT.json", "VERDICT.json", ".smokin/emit.lock",
+                  "FINDINGS.md", "CHANGES.md", "QUESTIONS.md"):
             p = plan.root / "tasks" / tid / f
             if p.exists():
                 p.unlink(); n += 1
+        tr = plan.root / "tasks" / tid / ".smokin" / "transcript.log"
+        if tr.exists():
+            tr.unlink(); n += 1
         plan.tasks[tid].set_status("NOT STARTED")
     (plan.priv / "run.json").unlink(missing_ok=True)
     print(f"reset: removed {n} artefact(s); all tasks back to NOT STARTED")
