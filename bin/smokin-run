@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# smokin-run <TASK_ID> -- <command...>
+#
+# The universal wrapper. Every dispatch goes through it, whatever the runtime.
+#
+# It FORKS the child and waits. It must never `exec`: an exec'd process replaces
+# this one and the trap never fires, which is how the "universal floor" turned
+# out not to be a floor at all (SMOKIN-DESIGN §4e).
+#
+# It traps EXIT, HUP, TERM and INT. HUP is not paranoia — `herdr pane close`
+# sends SIGHUP, CONFIRMED by experiment Q2b, so a human closing a pane is a
+# recoverable event and the worker gets to say what happened on the way down.
+set -uo pipefail
+
+TASK_ID="${1:?usage: smokin-run <TASK_ID> -- <command...>}"; shift
+[ "${1:-}" = "--" ] && shift
+
+: "${SMOKIN_PLAN:?SMOKIN_PLAN must be set}"
+TASK_DIR="$SMOKIN_PLAN/tasks/$TASK_ID"
+PRIV="$TASK_DIR/.smokin"
+EMIT="${SMOKIN_EMIT:-$(dirname "$(readlink -f "$0")")/smokin-emit}"
+mkdir -p "$PRIV"
+
+child=""
+emitted=0
+
+emit() {
+  local rc="$1" sig="$2"
+  [ "$emitted" = 1 ] && return 0
+  emitted=1
+  # terminal is about the PROCESS. claim is about the WORK, and only the
+  # agent's own artefacts can speak to that — so the emitter derives it.
+  local terminal
+  case "$sig" in
+    HUP)          terminal="hangup" ;;
+    TERM|INT)     terminal="interrupted" ;;
+    *) if [ "$rc" -eq 0 ]; then terminal="ok"
+       elif [ "$rc" -gt 128 ]; then terminal="signalled"
+       else terminal="failed"; fi ;;
+  esac
+  printf '{"terminal":"%s","exit":%s,"signal":"%s","source":"wrapper-exit"}' \
+    "$terminal" "$rc" "$sig" | "$EMIT" "$TASK_ID" wrapper-exit || true
+}
+
+on_signal() { # a signal arrived: pass it on, then let wait return
+  local sig="$1"
+  [ -n "$child" ] && kill -s "$sig" "$child" 2>/dev/null
+  wait "$child" 2>/dev/null; local rc=$?
+  emit "$rc" "$sig"
+  exit "$rc"
+}
+
+trap 'on_signal HUP'  HUP
+trap 'on_signal TERM' TERM
+trap 'on_signal INT'  INT
+trap 'emit "$?" EXIT' EXIT
+
+printf 'SMOKIN_WRAPPER_START task=%s pid=%s at=%s\n' \
+  "$TASK_ID" "$$" "$(date -u +%FT%TZ)" >> "$PRIV/transcript.log"
+
+# tee into the task folder, never into a vendor state directory: a pointer to
+# ~/.claude is not reconstructable from the repository (principle 14).
+"$@" > >(tee -a "$PRIV/transcript.log") 2> >(tee -a "$PRIV/transcript.log" >&2) &
+child=$!
+wait "$child"

@@ -1,0 +1,723 @@
+#!/usr/bin/env python3
+"""
+smokin — an idempotent tick that dispatches a Grillin plan from disk.
+
+    smokin doctor            probe the machine, write .smokin/doctor.json
+    smokin tick              one pass: reap, reap-verdicts, dispatch, render
+    smokin run               tick until the plan is finished or stuck
+    smokin status            print the frontier
+    smokin present           re-render PROGRESS.md from STATUS.json
+    smokin reap [--close]    force-reap overdue tasks (--close tidies panes)
+    smokin reset --run <id>  retire a run's receipts and dispatch records
+
+THE WHOLE IDEA: there is no long-running orchestrator. Every fact the tick needs
+lives in the plan directory, so compaction, Ctrl-C, an SSH drop and
+`herdr server stop` are all no-ops on the plan. Grillin's principle 14 says
+assume amnesia and demands progress be reconstructable from the repository
+alone; until now nothing made that true for a RUNNING fleet. This is that
+mechanism, and it is the only thing Smokin claims that Grillin did not already.
+
+Zero dependencies (python3 stdlib). Fail-closed.
+"""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+# NOT anchored to line start: Grillin's own register puts several of these on
+# one line — "**Blocked by:** — · **Blocks:** T2" and "**Dispatch:** inproc ·
+# **Runtime:** `demo`". An anchored pattern silently reads only the first field
+# on each line and defaults the rest, which is how a task with a declared
+# runtime dispatched as "no-headless-mode".
+RE_FIELD = lambda n: re.compile(rf"\*\*{n}:\*\*\s*([^·\n]*?)(?=\*\*|·|$)", re.M | re.I)
+RE_STATUS = RE_FIELD("Status")
+RE_OWNER = RE_FIELD("Owner")
+RE_BLOCKED = RE_FIELD("Blocked by")
+RE_DISPATCH = RE_FIELD("Dispatch")
+RE_RUNTIME = RE_FIELD("Runtime")
+RE_BUDGET = RE_FIELD("Budget")
+RE_INTERRUPT = RE_FIELD("Interrupt")
+RE_WATCH = RE_FIELD("Watch")
+RE_TYPE = RE_FIELD("Type")
+RE_TASK_ID = re.compile(r"\b([A-Z]\d{1,3}[a-z]?)\b")
+RE_FENCE = re.compile(r"```[a-z]*\n(.*?)```", re.S)
+
+PANE_CEILING = {"XS": 0, "S": 1, "M": 3, "L": 5, "XL": 5}
+DEFAULT_BUDGET = 900
+
+
+# ── reading the plan ────────────────────────────────────────────────────────
+
+def done_command(path: Path):
+    """The fenced command under a '## Done means' heading. Fence-aware: a shell
+    comment inside the fence looks exactly like a markdown heading."""
+    body, in_section, in_fence = [], False, False
+    for line in path.read_text(errors="replace").splitlines():
+        if line.strip().startswith("```"):
+            if in_section:
+                body.append(line)
+            in_fence = not in_fence
+            continue
+        if not in_fence and re.match(r"^#+\s", line):
+            if in_section:
+                break
+            in_section = bool(re.match(r"^#+\s*Done\b", line, re.I))
+            continue
+        if in_section:
+            body.append(line)
+    m = RE_FENCE.search("\n".join(body) + "\n")
+    if not m:
+        return None
+    cmd = "\n".join(l for l in m.group(1).splitlines()
+                    if l.strip() and not l.strip().startswith("#")).strip()
+    return cmd or None
+
+
+def field(rx, text, default=""):
+    m = rx.search(text)
+    return m.group(1).strip() if m else default
+
+
+class Task:
+    def __init__(self, tid: Path):
+        self.id = tid.name
+        self.path = tid / "TASK.md"
+        self.dir = tid
+        t = self.path.read_text(errors="replace")
+        self.status = field(RE_STATUS, t, "NOT STARTED").upper()
+        self.owner = field(RE_OWNER, t)
+        self.blocked_by = set(RE_TASK_ID.findall(field(RE_BLOCKED, t)))
+        self.dispatch = (field(RE_DISPATCH, t, "inproc") or "inproc").lower()
+        self.runtime = field(RE_RUNTIME, t, "claude").strip("`")
+        self.type = field(RE_TYPE, t).upper()
+        self.interrupt = field(RE_INTERRUPT, t, "no").lower().startswith("y")
+        self.watch = field(RE_WATCH, t, "no").lower().startswith("y")
+        try:
+            self.budget = int(re.sub(r"\D", "", field(RE_BUDGET, t)) or DEFAULT_BUDGET)
+        except ValueError:
+            self.budget = DEFAULT_BUDGET
+        self.done_cmd = done_command(self.path)
+
+    def route(self):
+        """§2b, first match wins. Returns (decision, clause)."""
+        if self.interrupt:
+            return "pane", "1 · Interrupt: yes"
+        if self.watch:
+            return "pane", "2 · Watch: yes"
+        if self.type == "ASK":
+            return "pane", "3 · Type: ASK"
+        if self.budget > 900:
+            return "pane", "4 · Budget > 900s"
+        return "inproc", "6 · otherwise"
+
+    def set_status(self, new):
+        t = self.path.read_text(errors="replace")
+        if RE_STATUS.search(t):
+            t = RE_STATUS.sub(f"**Status:** {new}", t, count=1)
+        else:
+            t = f"**Status:** {new}\n" + t
+        self.path.write_text(t)
+        self.status = new
+
+
+class Plan:
+    def __init__(self, root: Path):
+        self.root = root
+        self.priv = root / ".smokin"
+        self.tasks = {}
+        td = root / "tasks"
+        if td.is_dir():
+            for d in sorted(td.iterdir()):
+                if d.is_dir() and (d / "TASK.md").is_file():
+                    self.tasks[d.name] = Task(d)
+
+    def size(self):
+        n = len(self.tasks)
+        return "XS" if n < 4 else "S" if n <= 10 else "M" if n <= 25 else "L" if n <= 60 else "XL"
+
+    def run_id(self):
+        f = self.priv / "run.json"
+        if f.is_file():
+            return json.loads(f.read_text())["run"]
+        self.priv.mkdir(parents=True, exist_ok=True)
+        rid = "r" + hashlib.sha256(f"{self.root}{time.time_ns()}".encode()).hexdigest()[:6]
+        (self.priv / "run.json").write_text(json.dumps(
+            {"run": rid, "started": now(), "plan_root": str(self.root)}, indent=1) + "\n")
+        return rid
+
+    def receipt(self, tid):
+        p = self.root / "tasks" / tid / "RECEIPT.json"
+        if not p.is_file():
+            return None
+        try:
+            r = json.loads(p.read_text())
+        except ValueError:
+            return {"stale": True, "why": "unparseable"}
+        for name, recorded in (r.get("artifacts") or {}).items():
+            if recorded is None:
+                continue
+            f = self.root / "tasks" / tid / name
+            if not f.is_file() or "sha256:" + hashlib.sha256(f.read_bytes()).hexdigest() != recorded:
+                return {"stale": True, "why": f"{name} hash mismatch", **r}
+        return r
+
+    def verdict(self, tid):
+        p = self.root / "tasks" / tid / "VERDICT.json"
+        try:
+            return json.loads(p.read_text())
+        except (OSError, ValueError):
+            return None
+
+    def dispatch_rec(self, tid):
+        try:
+            return json.loads((self.priv / "dispatch" / f"{tid}.json").read_text())
+        except (OSError, ValueError):
+            return None
+
+    def state(self, tid):
+        """The single source of truth for what a task IS. Order matters."""
+        t = self.tasks[tid]
+        v = self.verdict(tid)
+        if v and v.get("pass"):
+            return "verified"
+        if v and not v.get("pass"):
+            return "refuted"
+        r = self.receipt(tid)
+        if r and not r.get("stale"):
+            return "claimed"
+        if self.dispatch_rec(tid):
+            return "running"
+        if t.blocked_by - {k for k in self.tasks if self.state_cheap(k) == "verified"}:
+            return "blocked"
+        return "ready"
+
+    def state_cheap(self, tid):
+        v = self.verdict(tid)
+        if v and v.get("pass"):
+            return "verified"
+        return "other"
+
+    def frontier(self):
+        out = []
+        for tid, t in self.tasks.items():
+            if self.state(tid) != "ready":
+                continue
+            if all(self.state_cheap(b) == "verified" for b in t.blocked_by if b in self.tasks):
+                out.append(tid)
+        return sorted(out)
+
+
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def ledger(plan: Plan, **kw):
+    kw["at"] = now()
+    plan.priv.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(plan.priv / "ledger.jsonl"),
+                 os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, (json.dumps(kw, ensure_ascii=False) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+
+def runtimes(plan: Plan):
+    for p in (plan.priv / "runtimes.json", HERE.parent / "templates" / "runtimes.json"):
+        if p.is_file():
+            return json.loads(p.read_text())
+    return {}
+
+
+def launch(plan: Plan, t: Task, rts: dict, dry=False):
+    decision, clause = t.route()
+    rid = plan.run_id()
+    seq = f"{rid}:{t.id}:1"
+    row = rts.get(t.runtime, {})
+    (plan.priv / "dispatch").mkdir(parents=True, exist_ok=True)
+
+    line = f"read tasks/{t.id}/TASK.md and follow it"
+    if len(line) > 512:
+        raise SystemExit(f"dispatch line for {t.id} exceeds 512 bytes")
+
+    env = dict(os.environ,
+               SMOKIN_PLAN=str(plan.root), SMOKIN_TASK_ID=t.id,
+               SMOKIN_TASK_DIR=str(t.dir), SMOKIN_EMIT=str(HERE / "smokin-emit"))
+
+    rec = {"run": rid, "seq": seq, "task": t.id, "attempt": 1,
+           "dispatch": decision, "clause": clause, "runtime": t.runtime,
+           "started": now(), "started_ns": time.time_ns(),
+           "started_epoch": time.time(), "budget_s": t.budget,
+           "placement": None, "pid_or_pane": None}
+
+    if dry:
+        rec["dry"] = True
+        (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
+        return decision, "dry-run"
+
+    wrapper = str(HERE / "smokin-run")
+    if decision == "pane":
+        tmpl = row.get("pane") or f"{t.runtime} {{LINE}}"
+        inner = tmpl.replace("{WT}", str(plan.root)).replace("{LINE}", line)
+        pane = herdr_pane(plan, t)
+        rec["placement"] = pane
+        rec["pid_or_pane"] = pane and pane.get("pane")
+        # the dispatch record is written BEFORE launch: that is what makes a
+        # missing receipt mean something rather than being indistinguishable
+        # from never-dispatched.
+        (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
+        if pane:
+            cmd = (f"SMOKIN_PLAN={plan.root} SMOKIN_EMIT={HERE/'smokin-emit'} "
+                   f"bash {wrapper} {t.id} -- {inner}")
+            sh(["herdr", "pane", "run", pane["pane"], cmd])
+            return decision, pane["pane"]
+        return decision, "pane-unavailable"
+
+    head = row.get("headless")
+    if not head:
+        return decision, "no-headless-mode"
+    (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
+    argv = ["bash", wrapper, t.id, "--"] + head.split() + [line]
+    p = subprocess.Popen(argv, cwd=str(plan.root), env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    rec["pid_or_pane"] = p.pid
+    (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
+    return decision, f"pid {p.pid}"
+
+
+def sh(argv, timeout=20):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def herdr_pane(plan: Plan, t: Task):
+    """Create a pane. Optional by construction: if herdr is absent the task
+    still runs, it just runs without a screen."""
+    if os.environ.get("HERDR_ENV") != "1":
+        return None
+    r = sh(["herdr", "pane", "split", "--current", "--direction", "right",
+            "--cwd", str(plan.root), "--no-focus"])
+    if not r or r.returncode != 0:
+        return None
+    try:
+        pid = json.loads(r.stdout)["result"]["pane"]["pane_id"]
+    except (ValueError, KeyError):
+        return None
+    sh(["herdr", "pane", "rename", pid, f"smokin:{t.id}"])
+    return {"pane": pid, "workspace": os.environ.get("HERDR_WORKSPACE_ID"),
+            "tab": os.environ.get("HERDR_TAB_ID")}
+
+
+# ── reaping and verdicts ────────────────────────────────────────────────────
+
+def reap(plan: Plan, close_panes=False):
+    """A missing receipt is a result. Runs INSIDE the tick — never a daemon,
+    because a dead reaper turns a crashed worker into an orchestrator that
+    waits forever, which is the failure Smokin exists to delete."""
+    out = []
+    d = plan.priv / "dispatch"
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.json")):
+        try:
+            rec = json.loads(f.read_text())
+        except ValueError:
+            continue
+        tid = rec["task"]
+        if (plan.root / "tasks" / tid / "RECEIPT.json").is_file():
+            continue
+        if time.time() - rec.get("started_epoch", 0) < rec.get("budget_s", DEFAULT_BUDGET):
+            continue
+        tr = plan.root / "tasks" / tid / ".smokin" / "transcript.log"
+        tail = "\n".join(tr.read_text(errors="replace").splitlines()[-20:]) if tr.is_file() else ""
+        receipt = {"schema": "smokin.receipt/1", "seq": rec["seq"], "run": rec["run"],
+                   "task": tid, "attempt": rec.get("attempt", 1), "terminal": "reaped",
+                   "claim": "partial", "runtime": rec.get("runtime"),
+                   "dispatch": rec.get("dispatch"), "source": "reaper", "exit": None,
+                   "started": rec.get("started"), "ended": now(),
+                   "wall_s": round(time.time() - rec.get("started_epoch", 0), 1),
+                   "result": tail, "artifacts": {}, "placement": rec.get("placement")}
+        (plan.root / "tasks" / tid / "RECEIPT.json").write_text(json.dumps(receipt, indent=1) + "\n")
+        if close_panes and rec.get("dispatch") == "pane" and rec.get("pid_or_pane"):
+            # SIGHUP, per experiment Q2b — the worker still gets to speak.
+            sh(["herdr", "pane", "close", str(rec["pid_or_pane"])])
+        ledger(plan, event="reaped", task=tid, seq=rec["seq"])
+        out.append(tid)
+    return out
+
+
+def take_verdict(plan: Plan, tid: str):
+    """The tick re-runs the task's OWN done-command. A receipt is the agent's
+    CLAIM; the verdict is the project's. Principle 8 one level down: a receipt
+    may be a precondition of the gate, it may never BE the gate."""
+    t = plan.tasks[tid]
+    if not t.done_cmd:
+        v = {"pass": False, "why": "no done-command", "at": now()}
+    else:
+        r = subprocess.run(t.done_cmd, shell=True, cwd=str(plan.root),
+                           capture_output=True, text=True, timeout=120)
+        blew = r.returncode in (126, 127)
+        v = {"pass": r.returncode == 0 and not blew, "exit": r.returncode,
+             "cmd": t.done_cmd, "at": now(),
+             "why": "gate could not run (exit %d)" % r.returncode if blew else None,
+             "stdout": (r.stdout or "")[-500:], "stderr": (r.stderr or "")[-500:]}
+    (t.dir / "VERDICT.json").write_text(json.dumps(v, indent=1) + "\n")
+    t.set_status("DONE" if v["pass"] else "BLOCKED")
+    ledger(plan, event="verdict", task=tid, **{"pass": v["pass"]})
+    return v
+
+
+def drain_spool(plan: Plan):
+    """Claim BEFORE acting. rename(inbox -> done) is the only race-free
+    primitive available; acting first and moving the pointer after leaves a
+    window where kill -9 re-dispatches dependants onto still-running copies."""
+    spool = plan.priv / "spool"
+    inbox, done = spool / "inbox", spool / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    claimed = []
+    if not inbox.is_dir():
+        return claimed
+    for f in sorted(inbox.glob("*.json")):
+        try:
+            os.rename(f, done / f.name)          # the claim
+        except OSError:
+            continue                             # someone else got it
+        try:
+            claimed.append(json.loads((done / f.name).read_text())["task"])
+        except (OSError, ValueError):
+            pass
+    return claimed
+
+
+# ── the tick ────────────────────────────────────────────────────────────────
+
+def tick(plan: Plan, dry=False, close_panes=False):
+    plan.priv.mkdir(parents=True, exist_ok=True)
+    lock = open(plan.priv / "tick.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another tick holds the lock — nothing to do")
+        return 0
+
+    rts = runtimes(plan)
+    reaped = reap(plan, close_panes)
+    claimed = drain_spool(plan)
+
+    verdicts = {}
+    for tid in sorted(set(claimed) | set(reaped)):
+        if tid in plan.tasks and not plan.verdict(tid):
+            verdicts[tid] = take_verdict(plan, tid)
+
+    plan.__init__(plan.root)                     # re-read: statuses changed
+
+    ceiling = PANE_CEILING[plan.size()]
+    live_panes = sum(1 for f in (plan.priv / "dispatch").glob("*.json")
+                     if json.loads(f.read_text()).get("dispatch") == "pane"
+                     and not (plan.root / "tasks" /
+                              json.loads(f.read_text())["task"] / "RECEIPT.json").is_file()) \
+        if (plan.priv / "dispatch").is_dir() else 0
+
+    dispatched, queued = [], []
+    for tid in plan.frontier():
+        t = plan.tasks[tid]
+        decision, _ = t.route()
+        if decision == "pane" and live_panes >= ceiling:
+            queued.append((tid, "pane-ceiling"))
+            continue
+        d, where = launch(plan, t, rts, dry=dry)
+        if where in ("no-headless-mode", "pane-unavailable"):
+            # Do NOT mark it started. A task marked IN PROGRESS with no dispatch
+            # record is the state that cannot be told apart from a crash, and
+            # inventing it here would defeat the whole reason the dispatch
+            # record is written before launch.
+            queued.append((tid, where))
+            ledger(plan, event="dispatch-failed", task=tid, why=where)
+            continue
+        if d == "pane":
+            live_panes += 1
+        t.set_status("IN PROGRESS")
+        dispatched.append((tid, d, where))
+        ledger(plan, event="dispatched", task=tid, dispatch=d, where=str(where))
+
+    plan.__init__(plan.root)
+    st = render_status(plan, reaped, list(verdicts), dispatched, queued)
+    write_progress(plan, st)
+
+    for tid in reaped:
+        print(f"  reaped   {tid}")
+    for tid, v in verdicts.items():
+        print(f"  verdict  {tid}  {'PASS' if v['pass'] else 'REFUTED'}")
+    for tid, d, where in dispatched:
+        print(f"  dispatch {tid}  {d}  {where}")
+    for tid, why in queued:
+        print(f"  queued   {tid}  ({why})")
+
+    inflight = st["counts"]["running"] + st["counts"]["claimed"]
+    if st["counts"]["verified"] == len(plan.tasks) and plan.tasks:
+        print(f"\nplan complete — {len(plan.tasks)}/{len(plan.tasks)} verified")
+        return 0
+    if inflight == 0 and not st["frontier"]:
+        print("\nnothing in flight and nothing ready — the plan is STUCK")
+        return 3
+    print(f"\n{inflight} in flight · see PROGRESS.md")
+    return 1
+
+
+# ── the presenter ───────────────────────────────────────────────────────────
+# Split deliberately in two. `render_status` produces STATUS.json — machine
+# truth, derived only from files. `write_progress` renders PROGRESS.md and may
+# read NOTHING except that object. Same rule as Grillin's reader model: the
+# thing that narrates is not allowed to re-derive the facts it narrates, or it
+# will eventually narrate something that is not true.
+
+GLYPH = {"verified": "●", "claimed": "◑", "running": "◐", "ready": "○",
+         "blocked": "⊘", "refuted": "✗"}
+WORD = {"verified": "verified", "claimed": "claimed, ungated", "running": "running",
+        "ready": "ready", "blocked": "blocked", "refuted": "REFUTED"}
+
+
+def render_status(plan: Plan, reaped, verdicted, dispatched, queued):
+    rows, counts = [], {k: 0 for k in GLYPH}
+    for tid in sorted(plan.tasks):
+        t, s = plan.tasks[tid], plan.state(tid)
+        counts[s] = counts.get(s, 0) + 1
+        r = plan.receipt(tid) or {}
+        d = plan.dispatch_rec(tid) or {}
+        rows.append({
+            "id": tid, "state": s, "owner": t.owner, "runtime": t.runtime,
+            "dispatch": (d.get("dispatch") or t.route()[0]),
+            "clause": d.get("clause"), "where": d.get("pid_or_pane"),
+            "blocked_by": sorted(t.blocked_by),
+            "waiting_on": sorted(b for b in t.blocked_by
+                                 if b in plan.tasks and plan.state(b) != "verified"),
+            "needs_human": t.interrupt or t.type == "ASK"
+                           or (plan.root / "tasks" / tid / "QUESTIONS.md").is_file(),
+            "claim": r.get("claim"), "terminal": r.get("terminal"),
+            "result": (r.get("result") or "").strip().splitlines()[-1:] or [""],
+            "wall_s": r.get("wall_s"),
+            "elapsed_s": round(time.time() - d["started_epoch"]) if d.get("started_epoch")
+                         and s == "running" else None,
+            "budget_s": d.get("budget_s"),
+        })
+    st = {"schema": "smokin.status/1", "run": plan.run_id(), "at": now(),
+          "plan": str(plan.root), "size": plan.size(),
+          "pane_ceiling": PANE_CEILING[plan.size()],
+          "counts": counts, "total": len(plan.tasks), "tasks": rows,
+          "frontier": plan.frontier(),
+          "this_tick": {"reaped": reaped, "verdicted": verdicted,
+                        "dispatched": [d[0] for d in dispatched],
+                        "queued": [q[0] for q in queued]}}
+    (plan.root / "STATUS.json").write_text(json.dumps(st, indent=1) + "\n")
+    return st
+
+
+def bar(done, total, width=28):
+    if not total:
+        return "─" * width
+    f = int(round(width * done / total))
+    return "█" * f + "░" * (width - f)
+
+
+def write_progress(plan: Plan, st: dict):
+    """PROGRESS.md — the human surface. Reads only `st`."""
+    L, c, tot = [], st["counts"], st["total"]
+    ver = c.get("verified", 0)
+    L.append("# Where the plan is")
+    L.append("")
+    L.append(f"`{bar(ver, tot)}`  **{ver} of {tot} verified**")
+    L.append("")
+    L.append(f"*run `{st['run']}` · size {st['size']} · rendered {st['at']} · "
+             f"regenerated every tick — do not edit by hand*")
+    L.append("")
+
+    need = [t for t in st["tasks"] if t["needs_human"] and t["state"] not in ("verified",)]
+    if need:
+        L.append("## ⏸ Waiting on you")
+        L.append("")
+        for t in need:
+            where = f" · pane `{t['where']}`" if t["where"] else ""
+            L.append(f"- **{t['id']}** — {WORD[t['state']]}{where}. "
+                     f"{'Has open QUESTIONS.md.' if t['claim'] == 'blocked' else 'Declared as needing a human.'}")
+        L.append("")
+
+    ref = [t for t in st["tasks"] if t["state"] == "refuted"]
+    if ref:
+        L.append("## ✗ Said done, gate disagreed")
+        L.append("")
+        for t in ref:
+            L.append(f"- **{t['id']}** — the agent claimed `{t['claim']}`, its own done-command "
+                     f"exited non-zero. This is the receipt-versus-verdict split doing its job.")
+        L.append("")
+
+    L.append("## Every task")
+    L.append("")
+    L.append("| | Task | State | Owner | Where | Waiting on |")
+    L.append("|---|---|---|---|---|---|")
+    for t in st["tasks"]:
+        el = ""
+        if t["elapsed_s"] is not None:
+            el = f" {t['elapsed_s']}s/{t['budget_s']}s"
+        elif t["wall_s"]:
+            el = f" {t['wall_s']}s"
+        where = f"`{t['where']}`" if t["where"] else ("—" if t["state"] in ("ready", "blocked") else t["dispatch"])
+        L.append(f"| {GLYPH[t['state']]} | **{t['id']}** | {WORD[t['state']]}{el} | "
+                 f"{t['owner'] or '—'} | {where} | {', '.join(t['waiting_on']) or '—'} |")
+    L.append("")
+
+    tt = st["this_tick"]
+    if any(tt.values()):
+        L.append("## What changed this tick")
+        L.append("")
+        for k, label in (("dispatched", "dispatched"), ("verdicted", "gated"),
+                         ("reaped", "reaped — budget expired, no receipt"),
+                         ("queued", "held at the pane ceiling")):
+            if tt[k]:
+                L.append(f"- **{label}:** {', '.join(tt[k])}")
+        L.append("")
+
+    L.append("## Reading this")
+    L.append("")
+    L.append("| | Means |")
+    L.append("|---|---|")
+    L.append("| ● verified | the task's **own** done-command was re-run by the tick and passed |")
+    L.append("| ◑ claimed, ungated | the agent said it finished. Nothing has checked that yet |")
+    L.append("| ◐ running | dispatched, inside its budget, no receipt |")
+    L.append("| ○ ready | every blocker is verified; the next tick will dispatch it |")
+    L.append("| ⊘ blocked | waiting on the tasks in the last column |")
+    L.append("| ✗ REFUTED | claimed done, gate said otherwise |")
+    L.append("")
+    L.append("**● and ◑ are not the same thing and the difference is the point.** A claim is not "
+             "evidence; it becomes evidence when a second hand runs the gate. Everything here is "
+             "derived from files in this directory — delete every agent and re-run `smokin tick` "
+             "and the same picture comes back.")
+    (plan.root / "PROGRESS.md").write_text("\n".join(L) + "\n")
+
+
+# ── doctor ──────────────────────────────────────────────────────────────────
+
+def doctor(plan: Plan):
+    rts = runtimes(plan)
+    out = {"at": now(), "runtimes": {}, "host": {}}
+    for name, row in rts.items():
+        head = (row.get("headless") or "").split()
+        out["runtimes"][name] = {
+            "installed": bool(head and shutil.which(head[0])),
+            "path": shutil.which(head[0]) if head else None,
+            "headless": bool(row.get("headless")), "pane": bool(row.get("pane"))}
+    out["host"] = {
+        "herdr": bool(shutil.which("herdr")), "inside_herdr": os.environ.get("HERDR_ENV") == "1",
+        "python": sys.version.split()[0],
+        "sh": os.path.realpath("/bin/sh"),
+        "same_filesystem": None, "fs_note": None}
+    try:
+        a = os.stat(plan.root).st_dev
+        (plan.priv).mkdir(parents=True, exist_ok=True)
+        b = os.stat(plan.priv).st_dev
+        out["host"]["same_filesystem"] = (a == b)
+        # inotify is silent on DrvFs/9p. This is WSL: a plan under /mnt/c stops
+        # delivering events, so the poll backstop is not optional there.
+        out["host"]["fs_note"] = ("plan is under /mnt — inotify will not fire, polling only"
+                                 if str(plan.root).startswith("/mnt/") else "native fs")
+    except OSError:
+        pass
+    plan.priv.mkdir(parents=True, exist_ok=True)
+    (plan.priv / "doctor.json").write_text(json.dumps(out, indent=1) + "\n")
+    print(f"host      sh={out['host']['sh']}  herdr={'yes' if out['host']['herdr'] else 'no'}"
+          f"  inside={'yes' if out['host']['inside_herdr'] else 'no'}")
+    print(f"          filesystem: {out['host']['fs_note']}")
+    for n, r in sorted(out["runtimes"].items()):
+        mark = "ok      " if r["installed"] else "MISSING "
+        print(f"runtime   {mark}{n:<12} headless={'y' if r['headless'] else 'n'} "
+              f"pane={'y' if r['pane'] else 'n'}")
+    missing = [n for n, r in out["runtimes"].items() if not r["installed"]]
+    if missing:
+        print(f"\n{len(missing)} runtime(s) declared and not installed: {', '.join(missing)}.")
+        print("Learn it here, not from a gate that passed because a missing binary")
+        print("exits 127 and looks like a clean failure.")
+    return 0
+
+
+def reset(plan: Plan, run):
+    n = 0
+    for p in list((plan.priv / "dispatch").glob("*.json")) if (plan.priv / "dispatch").is_dir() else []:
+        p.unlink(); n += 1
+    for d in ("spool/inbox", "spool/done", "spool/tmp"):
+        for p in list((plan.priv / d).glob("*")) if (plan.priv / d).is_dir() else []:
+            p.unlink(); n += 1
+    for tid in plan.tasks:
+        for f in ("RECEIPT.json", "VERDICT.json", ".smokin/emit.lock"):
+            p = plan.root / "tasks" / tid / f
+            if p.exists():
+                p.unlink(); n += 1
+        plan.tasks[tid].set_status("NOT STARTED")
+    (plan.priv / "run.json").unlink(missing_ok=True)
+    print(f"reset: removed {n} artefact(s); all tasks back to NOT STARTED")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("cmd", choices=["doctor", "tick", "run", "status", "present", "reap", "reset"])
+    ap.add_argument("plan", nargs="?", default=".")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--close", action="store_true", help="reap also closes the pane (SIGHUP)")
+    ap.add_argument("--run", default=None)
+    ap.add_argument("--max-ticks", type=int, default=200)
+    ap.add_argument("--interval", type=float, default=3.0)
+    a = ap.parse_args()
+
+    root = Path(a.plan).resolve()
+    if not (root / "tasks").is_dir():
+        print(f"smokin: {root} has no tasks/ — not a plan", file=sys.stderr)
+        return 2
+    plan = Plan(root)
+
+    if a.cmd == "doctor":
+        return doctor(plan)
+    if a.cmd == "reset":
+        return reset(plan, a.run)
+    if a.cmd == "reap":
+        got = reap(plan, a.close)
+        print(f"reaped {len(got)}: {', '.join(got) or '—'}")
+        return 0
+    if a.cmd in ("status", "present"):
+        st = render_status(plan, [], [], [], [])
+        write_progress(plan, st)
+        if a.cmd == "present":
+            print((root / "PROGRESS.md").read_text())
+        else:
+            c = st["counts"]
+            print(f"{c.get('verified',0)}/{st['total']} verified · "
+                  f"frontier: {', '.join(st['frontier']) or '—'}")
+        return 0
+    if a.cmd == "tick":
+        return tick(plan, a.dry_run, a.close)
+    if a.cmd == "run":
+        for i in range(a.max_ticks):
+            rc = tick(plan, a.dry_run, a.close)
+            if rc in (0, 3):
+                return rc
+            time.sleep(a.interval)
+            plan = Plan(root)
+        print("max ticks reached")
+        return 1
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

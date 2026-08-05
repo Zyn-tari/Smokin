@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+smokin-emit <TASK_ID> <source>   — reads a JSON fragment on stdin.
+
+The single emitter. Every runtime, every emission path, funnels through here,
+so there is exactly one place that knows how a receipt is published.
+
+Order of operations is normative and each step exists because of a defect:
+
+ 1. Claim exclusivity with O_EXCL. Two writers per task are GUARANTEED (the
+    wrapper's trap and a native hook), a stat is not a mutex, and both writing
+    the same path leaves the shorter write's tail behind — unparseable JSON in
+    the one file that is both the durable record and the gate's subject.
+    The loser does not wait. It logs and leaves.
+ 2. Apply the completion gate against an IMMUTABLE reference point.
+ 3. Write the receipt atomically: tmp -> fsync file -> fsync dir -> rename.
+ 4. Publish the pointer into the spool, atomically, same filesystem.
+ 5. Exit inside a hard budget. No retries, no network.
+
+Zero dependencies. Never raises into the caller: an emitter that crashes a
+worker is worse than a missing receipt, because the reaper handles a missing
+receipt and nothing handles a corrupted run.
+"""
+import hashlib
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+BUDGET_S = 2.0
+RESULT_MAX = 8192
+
+
+def log(plan: Path, **kw):
+    """One record per single os.write() — that is what keeps it append-safe."""
+    try:
+        kw["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        line = (json.dumps(kw, ensure_ascii=False) + "\n").encode()
+        fd = os.open(str(plan / ".smokin" / "ledger.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def sha(p: Path):
+    try:
+        return "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def atomic_write(target: Path, data: str):
+    """tmp -> fsync(file) -> rename -> fsync(dir). Never an in-place write."""
+    tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.write(fd, data.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(tmp, target)
+    dfd = os.open(str(target.parent), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def main() -> int:
+    t0 = time.time()
+    if len(sys.argv) < 3:
+        print("usage: smokin-emit <TASK_ID> <source>", file=sys.stderr)
+        return 2
+    task_id, source = sys.argv[1], sys.argv[2]
+    plan = Path(os.environ.get("SMOKIN_PLAN", ".")).resolve()
+    tdir = plan / "tasks" / task_id
+    priv = tdir / ".smokin"
+    priv.mkdir(parents=True, exist_ok=True)
+
+    try:
+        frag = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        frag = {}
+
+    # 1 · exclusivity. The loser leaves; it never blocks.
+    try:
+        fd = os.open(str(priv / "emit.lock"), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+    except FileExistsError:
+        log(plan, event="duplicate-emit", task=task_id, source=source)
+        return 0
+
+    disp_path = plan / ".smokin" / "dispatch" / f"{task_id}.json"
+    try:
+        disp = json.loads(disp_path.read_text())
+    except (OSError, ValueError):
+        log(plan, event="emit-without-dispatch", task=task_id, source=source)
+        return 0
+
+    # 2 · the completion gate, against the dispatch record's timestamp — an
+    # immutable reference. The draft compared against mtime(TASK.md), which the
+    # agent is contractually obliged to touch when it updates **Status:**; the
+    # natural write order then made the gate fail silently, forever.
+    findings = tdir / "FINDINGS.md"
+    produced = findings.is_file() and findings.stat().st_size > 0 and \
+        findings.stat().st_mtime_ns > disp.get("started_ns", 0)
+
+    terminal = frag.get("terminal", "ok")
+    if terminal in ("ok", "failed") and not produced:
+        # a turn ended, the task did not. Say so rather than inventing a result.
+        terminal = "no-artefact"
+
+    claim = "done" if produced else "partial"
+    if (tdir / "QUESTIONS.md").is_file() and (tdir / "QUESTIONS.md").stat().st_size > 0:
+        claim = "blocked"
+
+    result = frag.get("result")
+    if not result:
+        tr = priv / "transcript.log"
+        if tr.is_file():
+            result = "\n".join(tr.read_text(errors="replace").splitlines()[-20:])
+    result = (result or "")[:RESULT_MAX]
+
+    receipt = {
+        "schema": "smokin.receipt/1",
+        "seq": disp["seq"],
+        "run": disp["run"], "task": task_id, "attempt": disp.get("attempt", 1),
+        "terminal": terminal, "claim": claim,
+        "runtime": disp.get("runtime"), "dispatch": disp.get("dispatch"),
+        "source": source, "signal": frag.get("signal"),
+        "placement": disp.get("placement"),
+        "exit": frag.get("exit"),
+        "started": disp.get("started"),
+        "ended": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "wall_s": round(time.time() - disp.get("started_epoch", time.time()), 1),
+        "result": result,
+        "artifacts": {n: sha(tdir / n) for n in
+                      ("FINDINGS.md", "CHANGES.md", "QUESTIONS.md")},
+        "transcript": str((priv / "transcript.log").relative_to(plan)),
+    }
+
+    # 3 · the receipt
+    atomic_write(tdir / "RECEIPT.json", json.dumps(receipt, indent=1) + "\n")
+
+    # 4 · the pointer. seq is allocated ONCE at dispatch, so a duplicate
+    # emission collides on the dedup key instead of inventing a new one.
+    spool = plan / ".smokin" / "spool"
+    (spool / "tmp").mkdir(parents=True, exist_ok=True)
+    (spool / "inbox").mkdir(parents=True, exist_ok=True)
+    name = f"{disp.get('started_ns', 0)}-{receipt['seq'].replace(':', '_')}.json"
+    atomic_write(spool / "tmp" / name,
+                 json.dumps({"seq": receipt["seq"], "task": task_id,
+                             "receipt": f"tasks/{task_id}/RECEIPT.json"}) + "\n")
+    os.rename(spool / "tmp" / name, spool / "inbox" / name)
+
+    log(plan, event="emitted", task=task_id, seq=receipt["seq"],
+        terminal=terminal, claim=claim, source=source,
+        emit_ms=int((time.time() - t0) * 1000))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:                                   # never crash a worker
+        try:
+            log(Path(os.environ.get("SMOKIN_PLAN", ".")), event="emit-error", err=repr(e))
+        except Exception:
+            pass
+        sys.exit(0)

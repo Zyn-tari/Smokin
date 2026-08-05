@@ -1,0 +1,201 @@
+# Smokin rules — the substrate that survives its own orchestrator
+
+One copy. Every `TASK.md` references this file rather than restating it; if a task's rules and
+this file disagree, **this file wins and one of them needs fixing.**
+
+Smokin is Grillin's third substrate. Grillin decides *what the plan is*; Smokin *runs it*. The two
+are separate on purpose — a plan that cannot be read by a human is not improved by being run by a
+machine.
+
+---
+
+## 0 · Confirm the tick is the orchestrator
+
+```bash
+smokin doctor .
+```
+
+There is **no long-running orchestrator process.** `smokin tick` reads the plan off disk,
+dispatches what is ready, reaps what finished, renders the surface, and exits. Everything it needs
+is a file in this directory.
+
+That is the whole claim, and it is the one Grillin's principle 14 has always demanded and never
+had: *assume amnesia — anything living only in a conversation is already gone.* Compaction,
+`Ctrl-C`, an SSH drop, `herdr server stop`, closing the terminal — all of them are no-ops on the
+plan, because the plan's state was never in the process.
+
+**Test it rather than believing it:** `kill -9` a worker, close the terminal, open a new one, run
+`smokin tick` once. Same frontier, the dead worker reaped, the next wave dispatched.
+
+---
+
+## 1 · The routing rule — pane or in-process
+
+Declared per task, first match wins:
+
+| # | If | Then |
+|---|---|---|
+| 1 | `**Interrupt:** yes` | **PANE** — it has an approval-bearing or human-answerable step |
+| 2 | `**Watch:** yes` | **PANE** — somebody stated in writing they will look at it |
+| 3 | `**Type:** ASK` | **PANE** — an ASK node terminates on a human |
+| 4 | `**Budget:** > 900` | **PANE** — work that outlives the tick must outlive its process |
+| 5 | the runtime has no headless mode | **PANE** — the only way to run it at all |
+| 6 | otherwise | **INPROC** |
+
+**The rule points the opposite way from the reflex. You do not open a pane to get parallelism.**
+Parallelism is free in-process — the tick forks and reaps. A pane is bought with a screen and paid
+for in human review capacity, and that is the one constraint no tool in the prior art solved.
+
+**Honest limit.** Clauses 3 and 5 have an external referent. `Interrupt`, `Watch` and `Budget` are
+author declarations, so a gate on them checks *self-consistency*, not truth. Dispatch is
+author-chosen inside a checked envelope; one clause of six is pure taste, declared where a reader
+can argue with it. Anyone who tells you the routing is a pure function has not tried to flip one.
+
+---
+
+## 2 · The receipt is a claim. The verdict is the project's.
+
+| File | Written by | Says |
+|---|---|---|
+| `RECEIPT.json` | the worker's wrapper or hook | *the agent claims it finished* |
+| `VERDICT.json` | the tick, re-running the task's **own** `## Done means` | *a second hand checked* |
+
+**A receipt may be a precondition of a gate. It may never BE the gate.** A receipt plus a two-line
+findings file passes `test -f` with zero real work done — which would turn Grillin's most
+load-bearing check into a liveness probe. This is principle 8 one level down: nobody certifies
+their own work, including a worker certifying its own completion.
+
+`PROGRESS.md` renders `● verified` and `◑ claimed, ungated` differently for exactly this reason.
+
+---
+
+## 3 · The spool
+
+```
+.smokin/dispatch/<ID>.json   written BEFORE launch
+.smokin/spool/{tmp,inbox,done}
+tasks/<ID>/RECEIPT.json      published tmp → fsync → rename
+```
+
+**The dispatch record is what makes silence mean something.** Without it, a cold reader looking at
+a task with no receipt cannot tell *never dispatched* from *running right now* from *was running
+when the machine died*.
+
+Three rules that are not negotiable because each one is a defect that was found:
+
+- **Publish by `rename(2)`, never in place.** Two writers per task are guaranteed — the wrapper's
+  trap and a native hook — and a stat is not a mutex.
+- **`seq` is allocated once, at dispatch.** `<run>:<task>:<attempt>`. Derive it from a timestamp
+  and duplicate emissions carry different keys, so the dedup never collides.
+- **Claim before acting.** `rename(inbox → done)` *then* act. Acting first leaves a window where a
+  crash re-dispatches dependants on top of still-running copies.
+
+`spool/tmp` and `spool/inbox` must be on one filesystem, and so must a task folder and its own
+receipt. `smokin doctor` checks it.
+
+---
+
+## 4 · The presenter — the plan has to be visible to a human
+
+**A process nobody can see is a process that gets missed.** Two files, and the split between them
+is the rule:
+
+| | |
+|---|---|
+| `STATUS.json` | machine truth, derived only from files on disk. Regenerated every tick |
+| `PROGRESS.md` | the human surface, rendered **only** from `STATUS.json` |
+
+**The presenter may not re-derive a single fact.** It reads the object and narrates it. This is the
+same rule as Grillin's reader model — the thing that narrates is not allowed to go and look for
+itself, because sooner or later it will narrate something that is not true.
+
+`PROGRESS.md` leads with **⏸ Waiting on you** when any task needs a human, then **✗ Said done, gate
+disagreed**, then every task, then what changed this tick. Someone who has been away opens one file
+and knows where the plan is.
+
+### The presenter agent, if you want prose
+
+Optionally, one pane runs a presenter agent whose entire contract is:
+
+- it reads `STATUS.json` and nothing else — not the tasks, not the findings, not the transcripts;
+- it writes `PROGRESS-NOTES.md`, never `PROGRESS.md`, which is generated;
+- it never says a task is done. It may only repeat `verified` or `claimed, ungated` as given.
+
+An agent that summarises the work instead of the status will eventually report a claim as a fact,
+which is the exact failure the receipt/verdict split exists to prevent.
+
+---
+
+## 5 · Ceilings
+
+`paneCeiling` by plan size: **XS 0 · S 1 · M 3 · L 5 · XL 5**.
+
+**These five numbers are an opinion and marking them a floor does not make them a measurement.**
+They come from practitioner reports that senior review capacity binds before compute does. Grillin
+phase 8's own rule applies — *do not pick the tool that looks structured, measure* — so they ship
+flagged provisional and the first plan that measures a real fan-out is expected to move them.
+
+A ceiling-blocked pane task is reported `queued(pane-ceiling)`. It is **never** silently demoted to
+in-process: demotion would violate the clause that produced it.
+
+---
+
+## 6 · Per-runtime wiring
+
+`.smokin/runtimes.json` is **the only file that knows any vendor's flags.** The tick has no branch
+on runtime anywhere.
+
+The entry condition for being a first-class runtime is: **it can be started by a shell command, and
+it can write a file into a directory.** It is *not* "is one of herdr's 21 agent kinds" and *not*
+"has a hook system". Codewhale is neither and works.
+
+Emission paths, in order of who is actually responsible:
+
+| Path | Applies | Status |
+|---|---|---|
+| **The wrapper** — forks, traps `EXIT HUP TERM INT`, emits | every dispatch | **the floor. CONFIRMED for panes by experiment** |
+| A native hook (Claude `Stop`, Codex `notify`, …) | some runtimes | an *accelerant* — lower latency, richer `result` |
+| **The reaper** — synthesises from the dispatch record | anything silent | **the guarantee** |
+
+Delete every accelerant and Smokin still terminates on a complete result set — later, with a
+thinner result. **The wrapper must never `exec`:** an exec'd process replaces the wrapper and the
+trap never fires.
+
+---
+
+## 7 · Do NOT
+
+- Do NOT wait on an agent's lifecycle instead of its receipt. `herdr agent list` on a real machine
+  reported two bare login shells as idle `claude` agents; a false idle is indistinguishable from a
+  finished worker. Classification is a display concern.
+- Do NOT use `herdr pane wait-output` as a completion detector. A TUI on the alternate screen never
+  reaches scrollback. **Watch the filesystem, never the screen.**
+- Do NOT call an agent binary from a `## Done means` command. The gate then tests whether the tool
+  is installed, not whether the work is finished.
+- Do NOT open a pane to get parallelism.
+- Do NOT let a pane task open panes or spawn sub-agents. One orchestrator level: the tick opens
+  panes, panes do not.
+- Do NOT put a task id inside a machine-wide hook. It will fire for every pane on the box.
+- Do NOT edit `PROGRESS.md` or `STATUS.json`. Both are generated; your edit is gone next tick.
+
+---
+
+## 8 · The boundary of that claim
+
+Smokin gives **process** persistence, not power-loss durability. It `fsync`s, which is
+daemon-and-clean-reboot persistence. *"The state is in the repository"* must not be read as more.
+
+**It does not prove correctness.** It proves a task ran, produced artefacts, and passed a gate
+somebody else wrote. It cannot tell you the gate was worth running — that still needs the
+uncontaminated adversarial reader Grillin staffs.
+
+**The tick is only as fresh as its last run.** If nothing ticks, receipts sit in the spool and the
+plan is complete-but-unreaped. That is the price of refusing a resident listener: paid in latency,
+never in lost work.
+
+**Phase 8's obligation is unmet.** Grillin's `substrates.measure[]` has five rows — effective
+parallelism, wall-clock on the same real fan-out, time-to-detect a stalled worker, orchestrator
+tokens spent watching, recovery cost after a context loss. **Not one is filled for Smokin.** It may
+be declared and used; it may not be *recommended* over the default substrate until those numbers
+exist for a real fan-out. Smokin is precisely the structured-looking tool that rule was written
+about.
