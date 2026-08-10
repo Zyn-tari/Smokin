@@ -509,10 +509,17 @@ def invoke_judge(root: Path, priv: Path, rule: dict, tid: str, runtimes: dict,
         out.unlink()
 
     row = runtimes.get(rule["runtime"]) or {}
-    head = row.get("headless")
+    # A `judge` command may carry {MODEL}/{EFFORT}; `headless` is the fallback and
+    # usually carries neither. Which placeholders were present is recorded on the
+    # ruling, because the roster's pairing is a REQUEST until something applies it,
+    # and a record that claims an unapplied pairing is the exact defect class this
+    # tool exists to catch.
+    head = row.get("judge") or row.get("headless")
     if not head:
         return None, (f"runtime {rule['runtime']!r} has no headless mode, so the judge for "
                       f"{rule['class']} on {tid} could not be reached")
+    enforced = {"model": "{MODEL}" in head, "effort": "{EFFORT}" in head}
+    head = head.replace("{MODEL}", rule["model"]).replace("{EFFORT}", rule["effort"])
 
     line = f"read {os.path.relpath(wd / 'BRIEF.md', root)} and follow it exactly"
     argv = head.split() + [line]
@@ -549,7 +556,9 @@ def invoke_judge(root: Path, priv: Path, rule: dict, tid: str, runtimes: dict,
                       f"A ruling nobody can review is not a ruling.")
 
     return {"class": rule["class"], "task": tid, "persona": rule["persona"],
-            "model": rule["model"], "effort": rule["effort"], "outcome": outcome,
+            "model": rule["model"], "effort": rule["effort"],
+            # What the roster ASKED for versus what the runtime could APPLY.
+            "pairing_enforced": enforced, "outcome": outcome,
             "because": because, "evidence": [it["path"] for it in items],
             "evidence_digest": digest, "runtime": rule["runtime"],
             "judge_exit": rc, "attempt": attempt}, None

@@ -968,12 +968,25 @@ def show_rulings(plan: Plan):
           + ("   (a gate-passing task no class covers HALTS)"
              if rs.policy.get("uncovered") == "halt"
              else "   (a gate-passing task no class covers advances — on the record)"))
+    rts = runtimes(plan)
     print(f"classes: {len(rs.rulings)}")
     for r in rs.rulings:
+        row = rts.get(r["runtime"]) or {}
+        cmd = row.get("judge") or row.get("headless") or ""
         print(f"  {r['class']}")
         print(f"      when      {r['when_src']}")
         print(f"      judge     {r['persona']} · {r['model']} · {r['effort']} "
               f"· runtime {r['runtime']} · {r['budget_s']}s")
+        if not cmd:
+            print(f"      WARNING   runtime {r['runtime']!r} has no headless mode. This class "
+                  f"cannot be judged; the tick will halt on it.")
+        else:
+            missing = [w for w, ph in (("model", "{MODEL}"), ("effort", "{EFFORT}"))
+                       if ph not in cmd]
+            if missing:
+                print(f"      NOTE      the {r['runtime']!r} command applies no "
+                      f"{' or '.join(missing)} — the roster's pairing is a request here, not a "
+                      f"setting. Each ruling records what was actually applied.")
         print(f"      evidence  {', '.join(r['evidence'])}")
         print(f"      outcomes  {', '.join(r['outcomes'])}   (default: {r['default']})")
     led = R.read_ledger(plan.priv)

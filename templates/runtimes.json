@@ -7,11 +7,19 @@
     "shell command, and it can write a file into a directory. It is NOT 'is one of herdr's",
     "21 kinds' and NOT 'has a hook system'. Codewhale is neither and works fine.",
     "",
-    "{LINE} is the one-line dispatch prompt. {WT} is the plan root."
+    "{LINE} is the one-line dispatch prompt. {WT} is the plan root.",
+    "",
+    "`judge` is the command the delegation node uses for a tier-2 ruling, and it is the",
+    "only place {MODEL} and {EFFORT} are substituted. A runtime with no `judge` row falls",
+    "back to `headless`, which means the roster's pairing was REQUESTED and not applied —",
+    "and the ruling records that as pairing_enforced, rather than claiming a model that",
+    "never ran. A record that asserts an unapplied pairing is the defect class this whole",
+    "tool exists to catch, so it is not asserted."
   ],
 
   "claude": {
     "headless": "claude -p --permission-mode acceptEdits",
+    "judge": "claude -p --permission-mode acceptEdits --model {MODEL}",
     "pane": "claude",
     "holds_credentials": false,
     "hook_scope": "project-and-global",
