@@ -103,6 +103,18 @@ printf '{"terminal":"ok","exit":0}' | SMOKIN_PLAN="$P" "$ROOT/bin/smokin-emit" T
 v="$(python3 -c "import json;print(json.load(open('$P/tasks/T1/VERDICT.json'))['pass'])" 2>/dev/null)"
 chk "an agent claiming done is refuted by the gate" "$v" "False"
 
+# ── 7 · the delegation node ─────────────────────────────────────────────────
+# Its own harness, because it mutates six named failure modes rather than
+# walking a happy path. Run here so one command still covers the whole tool.
+echo
+if python3 "$ROOT/tests/test-rulings.py" > "$LAB/rulings.out" 2>&1; then
+  n=$(grep -c 'PASS' "$LAB/rulings.out")
+  ok "delegation node: $n ruling checks"
+else
+  bad "delegation node" "see below"
+  cat "$LAB/rulings.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

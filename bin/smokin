@@ -3,11 +3,13 @@
 smokin — an idempotent tick that dispatches a Grillin plan from disk.
 
     smokin doctor            probe the machine, write .smokin/doctor.json
-    smokin tick              one pass: reap, reap-verdicts, dispatch, render
+    smokin tick              one pass: reap, gate, judge, dispatch, render
     smokin run               tick until the plan is finished or stuck
     smokin status            print the frontier
     smokin present           re-render PROGRESS.md from STATUS.json
     smokin reap [--close]    force-reap overdue tasks (--close tidies panes)
+    smokin rulings           resolve and print the judgement layer
+    smokin resume            clear a halt, after a human has read it
     smokin reset --run <id>  retire a run's receipts and dispatch records
 
 THE WHOLE IDEA: there is no long-running orchestrator. Every fact the tick needs
@@ -16,6 +18,20 @@ lives in the plan directory, so compaction, Ctrl-C, an SSH drop and
 assume amnesia and demands progress be reconstructable from the repository
 alone; until now nothing made that true for a RUNNING fleet. This is that
 mechanism, and it is the only thing Smokin claims that Grillin did not already.
+
+THE OTHER HALF — THE DELEGATION NODE. A tick that only dispatches cannot make a
+judgement call, and the calls that matter most are judgements: is this receipt
+trustworthy, is this worker really blocked, does this failure mean stop. So
+judgement is INVOKED, not resident: when the tick reaches a decision it may not
+make mechanically, it asks one judge, writes the ruling to disk with its reason,
+and exits. The ruling file is the memory. See DELEGATION-NODE.md; the layer is
+opt-in by the presence of `_RULINGS.toml`, and it binds once it exists.
+
+THE FRONTIER ADVANCES ON RULINGS, NOT RECEIPTS. A receipt is a worker's claim
+about itself. A verdict is the project's own gate re-run by the tick. A ruling is
+a judgement by someone who did not write the work. Each is a strictly stronger
+statement than the one before it, and the plan moves on the strongest one the
+curator asked for.
 
 Zero dependencies (python3 stdlib). Fail-closed.
 """
@@ -32,6 +48,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import smokin_rulings as R                                          # noqa: E402
 # NOT anchored to line start: Grillin's own register puts several of these on
 # one line — "**Blocked by:** — · **Blocks:** T2" and "**Dispatch:** inproc ·
 # **Runtime:** `demo`". An anchored pattern silently reads only the first field
@@ -138,6 +156,11 @@ class Plan:
             for d in sorted(td.iterdir()):
                 if d.is_dir() and (d / "TASK.md").is_file():
                     self.tasks[d.name] = Task(d)
+        # The judgement layer, read once per construction. `standing` is the
+        # ruling that currently holds for each (class, task); the ledger keeps
+        # every superseded one, so a re-judge leaves a trail.
+        self.rules = R.load(root)
+        self.standing = R.standing(self.priv)
 
     def size(self):
         n = len(self.tasks)
@@ -182,12 +205,71 @@ class Plan:
         except (OSError, ValueError):
             return None
 
+    # ── the judgement layer ─────────────────────────────────────────────────
+
+    def ruling_ctx(self, tid):
+        """The whole namespace a `when` expression may see. Built from files
+        only — a `when` that could read anything else would be reading the
+        orchestrator's opinion, and the orchestrator is not allowed to have one."""
+        t = self.tasks[tid]
+        r = self.receipt(tid) or {}
+        v = self.verdict(tid) or {}
+        return {
+            "verdict.passed": bool(v.get("pass")), "verdict.exit": v.get("exit"),
+            "receipt.claim": r.get("claim"), "receipt.terminal": r.get("terminal"),
+            "receipt.source": r.get("source"), "receipt.stale": bool(r.get("stale")),
+            "task.id": t.id, "task.type": t.type, "task.owner": t.owner,
+            "task.runtime": t.runtime, "task.dispatch": t.route()[0],
+            "state": "gated",
+        }
+
+    def rulings_needed(self, tid):
+        """(required, outstanding). A required class with no standing ruling —
+        or one whose evidence has changed since it was ruled on — is outstanding."""
+        if not self.rules.active or self.rules.error:
+            return [], []
+        try:
+            required = self.rules.required_for(self.ruling_ctx(tid))
+        except Exception:
+            # A `when` that throws is not "no ruling required". Treat it as
+            # outstanding so the tick halts on it rather than sailing past.
+            return ["<when raised>"], ["<when raised>"]
+        out = []
+        for rule in required:
+            have = self.standing.get((rule["class"], tid))
+            if not have:
+                out.append(rule)
+            elif have.get("evidence_digest") != R.evidence_digest(
+                    self.root, tid, rule["evidence"]):
+                out.append(rule)                      # evidence moved; re-judge
+        return required, out
+
+    def ruling_state(self, tid):
+        """What the standing rulings say about a task whose gate already passed.
+        Returns 'verified' | 'judging' | 'rejected' | 'escalated' | 'uncovered'."""
+        if not self.rules.active or self.rules.error:
+            return "verified"
+        required, outstanding = self.rulings_needed(tid)
+        if not required:
+            return "verified" if self.rules.policy.get("uncovered") == "accept" else "uncovered"
+        if outstanding:
+            return "judging"
+        for rule in required:
+            o = (self.standing.get((rule["class"], tid)) or {}).get("outcome")
+            if o in R.REJECTING:
+                return "rejected"
+            if o not in R.ADVANCING:
+                return "escalated"          # insufficient-evidence, or anything else
+        return "verified"
+
+    # ── state ───────────────────────────────────────────────────────────────
+
     def state(self, tid):
         """The single source of truth for what a task IS. Order matters."""
         t = self.tasks[tid]
         v = self.verdict(tid)
         if v and v.get("pass"):
-            return "verified"
+            return self.ruling_state(tid)
         if v and not v.get("pass"):
             return "refuted"
         r = self.receipt(tid)
@@ -200,8 +282,12 @@ class Plan:
         return "ready"
 
     def state_cheap(self, tid):
+        """Used to resolve blockers. It MUST agree with `state` on what verified
+        means: a cheap check that stopped at the verdict would let dependants
+        dispatch on a gate alone, which is exactly the bypass the ruling layer
+        exists to close."""
         v = self.verdict(tid)
-        if v and v.get("pass"):
+        if v and v.get("pass") and self.ruling_state(tid) == "verified":
             return "verified"
         return "other"
 
@@ -402,6 +488,94 @@ def drain_spool(plan: Plan):
     return claimed
 
 
+# ── tier 3 · the halt ───────────────────────────────────────────────────────
+# A halt is a RESULT. The node stops, says exactly why, and waits for a human.
+# The alternative — guessing and continuing — produces a finished-looking plan
+# nobody can audit, which is worse than a plan that stopped.
+
+def halted(plan: Plan):
+    try:
+        return json.loads((plan.priv / "HALT.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def halt(plan: Plan, why: str, tier="3", task=None):
+    rec = {"schema": "smokin.halt/1", "at": now(), "tier": tier,
+           "task": task, "why": why, "run": plan.run_id(),
+           "clear_with": f"smokin resume {plan.root}"}
+    plan.priv.mkdir(parents=True, exist_ok=True)
+    (plan.priv / "HALT.json").write_text(json.dumps(rec, indent=1) + "\n")
+    ledger(plan, event="halt", tier=tier, task=task, why=why)
+    return rec
+
+
+def print_halt(rec):
+    print(f"\nHALTED — tier {rec['tier']}"
+          + (f" · task {rec['task']}" if rec.get("task") else ""))
+    print(f"  {rec['why']}")
+    print("\nNothing further will be dispatched until a human reads this and runs")
+    print(f"  {rec['clear_with']}")
+
+
+# ── tier 2 · judgement, invoked and then written down ───────────────────────
+
+def judge_pass(plan: Plan, rts: dict, dry=False):
+    """Ask one judge per outstanding ruling; record every answer; return the
+    first halt reason, or None.
+
+    There is no path through this function that advances a task without a judge
+    having actually answered inside its budget with an outcome from the declared
+    set. Every other path halts."""
+    made = []
+    if not plan.rules.active:
+        return made, None
+    if plan.rules.error:
+        return made, (f"{R.CONFIG_NAME} does not load: {plan.rules.error}. No ruling is made in "
+                      f"this plan until it is fixed — falling back to 'no rulings' would let a "
+                      f"typo turn the judgement layer off while still looking like it works.")
+
+    for tid in sorted(plan.tasks):
+        v = plan.verdict(tid)
+        if not (v and v.get("pass")):
+            continue
+        required, outstanding = plan.rulings_needed(tid)
+        if required and required[0] == "<when raised>":
+            return made, (f"a `when` expression raised while being evaluated for {tid}. An "
+                          f"expression that throws is not False; see {R.CONFIG_NAME}.")
+        if not required and plan.rules.policy.get("uncovered") == "halt":
+            return made, (f"{tid} passed its gate and no declared ruling class covers it. "
+                          f"The node does not decide what it was not told to decide. Either add a "
+                          f"[[ruling]] whose `when` matches, or write `uncovered = \"accept\"` "
+                          f"under [policy] so the choice is on the record.")
+        for rule in outstanding:
+            if dry:
+                made.append({"class": rule["class"], "task": tid, "outcome": "(dry-run)"})
+                continue
+            prior = plan.standing.get((rule["class"], tid))
+            print(f"  judging  {tid}  {rule['class']}  "
+                  f"({rule['persona']} · {rule['model']} · {rule['effort']})")
+            rec, why = R.invoke_judge(plan.root, plan.priv, rule, tid, rts,
+                                      attempt=(prior or {}).get("attempt", 0) + 1)
+            if why:
+                return made, why                       # default = halt. Not configurable.
+            if prior:
+                # Judge shopping leaves a trail: the superseded ruling stays in
+                # the file with its reason and is named by the one that replaced it.
+                rec["supersedes"] = prior.get("seq")
+                rec["supersedes_outcome"] = prior.get("outcome")
+            rec = R.append_ruling(plan.priv, rec)
+            plan.standing[(rule["class"], tid)] = rec
+            made.append(rec)
+            ledger(plan, event="ruling", task=tid, cls=rule["class"],
+                   outcome=rec["outcome"], persona=rule["persona"])
+            if rec["outcome"] not in R.ADVANCING and rec["outcome"] not in R.REJECTING:
+                return made, (f"the judge for {rule['class']} on {tid} answered "
+                              f"{rec['outcome']!r}: {rec['because']} This is tier 3 — it needs a "
+                              f"human, not another agent.")
+    return made, None
+
+
 # ── the tick ────────────────────────────────────────────────────────────────
 
 def tick(plan: Plan, dry=False, close_panes=False):
@@ -413,6 +587,11 @@ def tick(plan: Plan, dry=False, close_panes=False):
         print("another tick holds the lock — nothing to do")
         return 0
 
+    held = halted(plan)
+    if held:
+        print_halt(held)
+        return 4
+
     rts = runtimes(plan)
     reaped = reap(plan, close_panes)
     claimed = drain_spool(plan)
@@ -423,6 +602,19 @@ def tick(plan: Plan, dry=False, close_panes=False):
             verdicts[tid] = take_verdict(plan, tid)
 
     plan.__init__(plan.root)                     # re-read: statuses changed
+
+    rulings, why = judge_pass(plan, rts, dry=dry)
+    plan.__init__(plan.root)                     # re-read: rulings changed states
+    if why:
+        rec = halt(plan, why, task=None)
+        st = render_status(plan, reaped, list(verdicts), [], [], rulings, rec)
+        write_progress(plan, st)
+        for r in rulings:
+            print(f"  ruling   {r.get('task')}  {r.get('class')}  {r.get('outcome')}")
+        print_halt(rec)
+        return 4
+    for r in rulings:
+        print(f"  ruling   {r.get('task')}  {r.get('class')}  {r.get('outcome')}")
 
     ceiling = PANE_CEILING[plan.size()]
     live_panes = sum(1 for f in (plan.priv / "dispatch").glob("*.json")
@@ -454,7 +646,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
         ledger(plan, event="dispatched", task=tid, dispatch=d, where=str(where))
 
     plan.__init__(plan.root)
-    st = render_status(plan, reaped, list(verdicts), dispatched, queued)
+    st = render_status(plan, reaped, list(verdicts), dispatched, queued, rulings, None)
     write_progress(plan, st)
 
     for tid in reaped:
@@ -466,7 +658,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
     for tid, why in queued:
         print(f"  queued   {tid}  ({why})")
 
-    inflight = st["counts"]["running"] + st["counts"]["claimed"]
+    inflight = st["counts"]["running"] + st["counts"]["claimed"] + st["counts"]["judging"]
     if st["counts"]["verified"] == len(plan.tasks) and plan.tasks:
         print(f"\nplan complete — {len(plan.tasks)}/{len(plan.tasks)} verified")
         return 0
@@ -484,20 +676,30 @@ def tick(plan: Plan, dry=False, close_panes=False):
 # thing that narrates is not allowed to re-derive the facts it narrates, or it
 # will eventually narrate something that is not true.
 
-GLYPH = {"verified": "●", "claimed": "◑", "running": "◐", "ready": "○",
-         "blocked": "⊘", "refuted": "✗"}
-WORD = {"verified": "verified", "claimed": "claimed, ungated", "running": "running",
-        "ready": "ready", "blocked": "blocked", "refuted": "REFUTED"}
+GLYPH = {"verified": "●", "judging": "◍", "claimed": "◑", "running": "◐", "ready": "○",
+         "blocked": "⊘", "refuted": "✗", "rejected": "✗", "escalated": "⚑", "uncovered": "⚑"}
+WORD = {"verified": "verified", "judging": "awaiting a ruling",
+        "claimed": "claimed, ungated", "running": "running", "ready": "ready",
+        "blocked": "blocked", "refuted": "REFUTED", "rejected": "REJECTED by a judge",
+        "escalated": "ESCALATED — needs a human", "uncovered": "no ruling class covers it"}
 
 
-def render_status(plan: Plan, reaped, verdicted, dispatched, queued):
+def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
+                  rulings=(), halt_rec=None):
     rows, counts = [], {k: 0 for k in GLYPH}
     for tid in sorted(plan.tasks):
         t, s = plan.tasks[tid], plan.state(tid)
         counts[s] = counts.get(s, 0) + 1
         r = plan.receipt(tid) or {}
         d = plan.dispatch_rec(tid) or {}
+        held = [v for (c, k), v in plan.standing.items() if k == tid]
         rows.append({
+            "rulings": sorted(({"class": v.get("class"), "outcome": v.get("outcome"),
+                                "persona": v.get("persona"), "model": v.get("model"),
+                                "effort": v.get("effort"), "because": v.get("because"),
+                                "seq": v.get("seq"),
+                                "supersedes": v.get("supersedes")} for v in held),
+                              key=lambda x: x["seq"] or 0),
             "id": tid, "state": s, "owner": t.owner, "runtime": t.runtime,
             "dispatch": (d.get("dispatch") or t.route()[0]),
             "clause": d.get("clause"), "where": d.get("pid_or_pane"),
@@ -513,14 +715,21 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued):
                          and s == "running" else None,
             "budget_s": d.get("budget_s"),
         })
-    st = {"schema": "smokin.status/1", "run": plan.run_id(), "at": now(),
+    st = {"schema": "smokin.status/2", "run": plan.run_id(), "at": now(),
           "plan": str(plan.root), "size": plan.size(),
           "pane_ceiling": PANE_CEILING[plan.size()],
           "counts": counts, "total": len(plan.tasks), "tasks": rows,
           "frontier": plan.frontier(),
+          "judgement": {"active": plan.rules.active, "source": plan.rules.source,
+                        "error": plan.rules.error,
+                        "uncovered": plan.rules.policy.get("uncovered"),
+                        "classes": [r["class"] for r in plan.rules.rulings]},
+          "halt": halt_rec,
           "this_tick": {"reaped": reaped, "verdicted": verdicted,
                         "dispatched": [d[0] for d in dispatched],
-                        "queued": [q[0] for q in queued]}}
+                        "queued": [q[0] for q in queued],
+                        "ruled": [f"{r.get('task')}/{r.get('class')}={r.get('outcome')}"
+                                  for r in rulings]}}
     (plan.root / "STATUS.json").write_text(json.dumps(st, indent=1) + "\n")
     return st
 
@@ -543,6 +752,42 @@ def write_progress(plan: Plan, st: dict):
     L.append(f"*run `{st['run']}` · size {st['size']} · rendered {st['at']} · "
              f"regenerated every tick — do not edit by hand*")
     L.append("")
+
+    if st.get("halt"):
+        h = st["halt"]
+        L.append(f"## ⛔ HALTED — tier {h['tier']}")
+        L.append("")
+        L.append(f"> {h['why']}")
+        L.append("")
+        L.append(f"Nothing further is dispatched until a human reads this and runs "
+                 f"`{h['clear_with']}`. A halt that says why is a result; a node that "
+                 f"guessed and continued would not be.")
+        L.append("")
+
+    esc = [t for t in st["tasks"] if t["state"] in ("escalated", "uncovered")]
+    if esc:
+        L.append("## ⚑ A judge could not decide, or nothing was asked")
+        L.append("")
+        for t in esc:
+            last = (t["rulings"] or [{}])[-1]
+            L.append(f"- **{t['id']}** — {WORD[t['state']]}."
+                     + (f" `{last.get('class')}` → **{last.get('outcome')}**: "
+                        f"{last.get('because')}" if last.get("outcome") else ""))
+        L.append("")
+
+    rej = [t for t in st["tasks"] if t["state"] == "rejected"]
+    if rej:
+        L.append("## ✗ Gate passed, a judge said no")
+        L.append("")
+        for t in rej:
+            for r in t["rulings"]:
+                if r["outcome"] not in ("accept",):
+                    L.append(f"- **{t['id']}** — `{r['class']}` → **{r['outcome']}** "
+                             f"({r['persona']} · {r['model']} · {r['effort']}). {r['because']}")
+        L.append("")
+        L.append("*This is the layer the mechanical gate cannot reach: the command exited zero and "
+                 "someone who did not write the work read it and disagreed.*")
+        L.append("")
 
     need = [t for t in st["tasks"] if t["needs_human"] and t["state"] not in ("verified",)]
     if need:
@@ -583,6 +828,7 @@ def write_progress(plan: Plan, st: dict):
         L.append("## What changed this tick")
         L.append("")
         for k, label in (("dispatched", "dispatched"), ("verdicted", "gated"),
+                         ("ruled", "ruled on by a judge"),
                          ("reaped", "reaped — budget expired, no receipt"),
                          ("queued", "held at the pane ceiling")):
             if tt[k]:
@@ -593,17 +839,31 @@ def write_progress(plan: Plan, st: dict):
     L.append("")
     L.append("| | Means |")
     L.append("|---|---|")
-    L.append("| ● verified | the task's **own** done-command was re-run by the tick and passed |")
+    L.append("| ● verified | gate passed **and** every ruling the plan asked for came back `accept` |")
+    L.append("| ◍ awaiting a ruling | gate passed; a judge has not answered yet |")
     L.append("| ◑ claimed, ungated | the agent said it finished. Nothing has checked that yet |")
     L.append("| ◐ running | dispatched, inside its budget, no receipt |")
     L.append("| ○ ready | every blocker is verified; the next tick will dispatch it |")
     L.append("| ⊘ blocked | waiting on the tasks in the last column |")
-    L.append("| ✗ REFUTED | claimed done, gate said otherwise |")
+    L.append("| ✗ REFUTED | claimed done, the mechanical gate said otherwise |")
+    L.append("| ✗ REJECTED | gate passed, a judge who did not write the work said otherwise |")
+    L.append("| ⚑ escalated | a judge answered *insufficient-evidence*, or nothing was asked. A human decides |")
     L.append("")
-    L.append("**● and ◑ are not the same thing and the difference is the point.** A claim is not "
-             "evidence; it becomes evidence when a second hand runs the gate. Everything here is "
-             "derived from files in this directory — delete every agent and re-run `smokin tick` "
-             "and the same picture comes back.")
+    j = st.get("judgement") or {}
+    if j.get("active"):
+        L.append(f"*Judgement layer: **on** — {len(j.get('classes') or [])} declared class(es) "
+                 f"({', '.join(j.get('classes') or []) or '—'}), uncovered = "
+                 f"`{j.get('uncovered')}`. Every ruling, including superseded ones, is in "
+                 f"`.smokin/rulings.jsonl` with the reason it was made.*")
+    else:
+        L.append("*Judgement layer: **off** — no `_RULINGS.toml` beside the plan, so ● means the "
+                 "mechanical gate and nothing more.*")
+    L.append("")
+    L.append("**● ◑ and ✗-by-a-judge are three different statements and the differences are the "
+             "point.** A receipt is the worker's claim about itself; a verdict is the project's own "
+             "gate re-run by the tick; a ruling is a judgement by someone who did not write the "
+             "work. Everything here is derived from files in this directory — delete every agent "
+             "and re-run `smokin tick` and the same picture comes back.")
     (plan.root / "PROGRESS.md").write_text("\n".join(L) + "\n")
 
 
@@ -673,15 +933,81 @@ def reset(plan: Plan, run):
         if tr.exists():
             tr.unlink(); n += 1
         plan.tasks[tid].set_status("NOT STARTED")
+    # Rulings are NOT deleted. They are retired by appending a retirement, so the
+    # ruling and its reason stay readable after the run they judged is gone.
+    # Deleting them would make a reset the cheapest way to erase an inconvenient
+    # judgement, which is exactly the trail this design exists to leave.
+    retired = 0
+    for (cls, tid), rec in sorted(R.standing(plan.priv).items()):
+        R.append_ruling(plan.priv, {"class": cls, "task": tid, "retired": True,
+                                    "retires": rec.get("seq"), "outcome": rec.get("outcome"),
+                                    "because": f"retired by `smokin reset` (was: {rec.get('because')})"})
+        retired += 1
+    (plan.priv / "HALT.json").unlink(missing_ok=True)
     (plan.priv / "run.json").unlink(missing_ok=True)
-    print(f"reset: removed {n} artefact(s); all tasks back to NOT STARTED")
+    print(f"reset: removed {n} artefact(s), retired {retired} ruling(s); "
+          f"all tasks back to NOT STARTED")
+    return 0
+
+
+def show_rulings(plan: Plan):
+    """A silent config is indistinguishable from a working one unless something
+    can print it."""
+    rs = plan.rules
+    print(f"plan:   {plan.root}")
+    print(f"source: {rs.source or '(none — judgement layer is OFF; ● means the gate only)'}")
+    if rs.error:
+        print(f"\nERROR:  {rs.error}")
+        print("        No ruling is made in this plan until it is fixed. This is deliberate:")
+        print("        falling back to 'no rulings' would let a typo turn the judgement")
+        print("        layer off while still looking like it works.")
+        return 1
+    if not rs.active:
+        return 0
+    print(f"policy: uncovered = {rs.policy.get('uncovered')}"
+          + ("   (a gate-passing task no class covers HALTS)"
+             if rs.policy.get("uncovered") == "halt"
+             else "   (a gate-passing task no class covers advances — on the record)"))
+    print(f"classes: {len(rs.rulings)}")
+    for r in rs.rulings:
+        print(f"  {r['class']}")
+        print(f"      when      {r['when_src']}")
+        print(f"      judge     {r['persona']} · {r['model']} · {r['effort']} "
+              f"· runtime {r['runtime']} · {r['budget_s']}s")
+        print(f"      evidence  {', '.join(r['evidence'])}")
+        print(f"      outcomes  {', '.join(r['outcomes'])}   (default: {r['default']})")
+    led = R.read_ledger(plan.priv)
+    if led:
+        print(f"\nledger: {len(led)} ruling(s) recorded in .smokin/rulings.jsonl")
+        for rec in led[-8:]:
+            if rec.get("retired"):
+                print(f"  #{rec['seq']:<3} {rec.get('task')} {rec.get('class')} RETIRED")
+                continue
+            sup = f"  (supersedes #{rec['supersedes']})" if rec.get("supersedes") else ""
+            print(f"  #{rec['seq']:<3} {rec.get('task')} {rec.get('class')} "
+                  f"-> {rec.get('outcome')}{sup}")
+            print(f"       {rec.get('because')}")
+    return 0
+
+
+def resume(plan: Plan):
+    h = halted(plan)
+    if not h:
+        print("not halted — nothing to clear")
+        return 0
+    ledger(plan, event="resume", cleared_tier=h.get("tier"), was=h.get("why"))
+    (plan.priv / "HALT.json").unlink(missing_ok=True)
+    print(f"cleared a tier-{h['tier']} halt from {h['at']}:")
+    print(f"  {h['why']}")
+    print("\nThe halt is in .smokin/ledger.jsonl. Whatever caused it is not fixed by this.")
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["doctor", "tick", "run", "status", "present", "reap", "reset"])
+    ap.add_argument("cmd", choices=["doctor", "tick", "run", "status", "present",
+                                    "reap", "reset", "rulings", "resume"])
     ap.add_argument("plan", nargs="?", default=".")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--close", action="store_true", help="reap also closes the pane (SIGHUP)")
@@ -700,12 +1026,16 @@ def main():
         return doctor(plan)
     if a.cmd == "reset":
         return reset(plan, a.run)
+    if a.cmd == "rulings":
+        return show_rulings(plan)
+    if a.cmd == "resume":
+        return resume(plan)
     if a.cmd == "reap":
         got = reap(plan, a.close)
         print(f"reaped {len(got)}: {', '.join(got) or '—'}")
         return 0
     if a.cmd in ("status", "present"):
-        st = render_status(plan, [], [], [], [])
+        st = render_status(plan, [], [], [], [], (), halted(plan))
         write_progress(plan, st)
         if a.cmd == "present":
             print((root / "PROGRESS.md").read_text())
