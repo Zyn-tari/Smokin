@@ -242,12 +242,23 @@ chk("...one ruling recorded", len(led), 1)
 chk("...with the roster's pairing", (led[0]["model"], led[0]["effort"]), ("claude-opus-5", "xhigh"))
 chk("...and the persona", led[0]["persona"], "adversary")
 has("...and the reason, mandatory", led[0]["because"], "contract met")
+chk("...and what the runtime actually APPLIED, not just what was asked for",
+    led[0]["pairing_enforced"], {"model": False, "effort": False})
 chk("...and the evidence it was handed", sorted(led[0]["evidence"]),
     ["tasks/T1/RECEIPT.json", "tasks/T1/TASK.md", "tasks/T1/VERDICT.json"])
 chk("...evidence it was NOT handed is absent",
     any("FINDINGS" in e for e in led[0]["evidence"]), False)
 rc2, _ = tick(p)
 chk("a second tick does not re-judge unchanged evidence", len(ledger(p)), 1)
+
+p = plan("enforced", answer={"outcome": "accept", "because": "met"})
+(p / ".smokin" / "runtimes.json").write_text(json.dumps(
+    {"judge": {"headless": "bash judge-stub.sh",
+               "judge": "bash judge-stub.sh --model {MODEL} --effort {EFFORT}"},
+     "demo": {"headless": "true"}}))
+tick(p)
+chk("a runtime that CAN carry the pairing records it as applied",
+    ledger(p)[0]["pairing_enforced"], {"model": True, "effort": True})
 
 print("\n=== the frontier advances on RULINGS, not receipts ===")
 p = plan("reject", answer={"outcome": "reject", "because": "the migration was never run"})

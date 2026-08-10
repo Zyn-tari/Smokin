@@ -241,6 +241,13 @@ task, and the share of ticks that spent a single token.*
   monitor's `HERDR_MONITOR_ON_CHANGE` hook is the obvious hook to reuse; it is not wired.
 - **Cost of a false halt.** Fail-closed means a flaky judge endpoint stops a running plan. That is the
   correct trade, and it will be annoying, and nobody has measured how often it happens.
+- **The roster's pairing is only partly enforceable.** A runtime applies the model and the effort only
+  if its `judge` command in `runtimes.json` carries `{MODEL}` / `{EFFORT}`. `claude` can carry the
+  model; nothing on this machine can carry the effort from a shell command. So each ruling records
+  `pairing_enforced` — what was actually applied, separately from what the roster asked for — and
+  `smokin rulings` says so out loud. **The gap is real and is not papered over**: writing
+  `model: claude-opus-5` on a ruling that ran at the runtime's default would be the same defect this
+  whole tool exists to catch, one level up.
 
 ---
 
