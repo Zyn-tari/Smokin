@@ -1,6 +1,16 @@
 # The orchestrator is a delegation node
 
-**Status:** design, agreed 2026-08-10. Not built. `smokin tick` is the half of it that already exists.
+**Status:** **built**, 2026-08-10. `bin/smokin_rulings.py` is the judgement layer;
+`bin/smokin` carries the tiers and the halt. Opt-in by the presence of `_RULINGS.toml` beside the
+plan — without it the tick behaves exactly as it did before. Calibrated by `tests/test-rulings.py`,
+which mutation-tests every failure mode in §8; Grillin's `check_rulings` refuses a plan whose config
+would disable the layer silently.
+
+**What is proven and what is not.** The mechanism is tested against a scripted judge, so what the
+tests establish is that *the machinery around a judgement is sound* — evidence containment, the
+closed outcome set, fail-closed on every unreachable path, an append-only trail. They establish
+nothing about whether a real model's rulings are any good. §7's open cost — how often tier 2 fires on
+a real plan — is still unmeasured.
 
 **The shape, in one line.** The **curator** owns the plan and hands it over as a file. The
 **orchestrator** is a delegation node — a process that runs, decides, records, and exits. It makes
@@ -161,7 +171,7 @@ thing this design buys.
 ```
 smokin tick
   ├─ 0  acquire the tick lock            (one node at a time — two orchestrators is the collision nobody sees)
-  ├─ 0  read PLAN.md, _ROSTER.md, rulings.toml, .herdr/state.json, receipts/     [tier 0]
+  ├─ 0  read PLAN.md, _ROSTER.md, _RULINGS.toml, .herdr/state.json, receipts/     [tier 0]
   ├─ 0  reap: any dispatch past its deadline with no receipt is a FAILURE        [tier 0]
   ├─ 1  apply the plan's declared ceilings and retry policy                      [tier 1]
   ├─ 2  for each receipt needing a ruling: invoke one judge, write the ruling    [tier 2]
@@ -234,13 +244,35 @@ task, and the share of ticks that spent a single token.*
 
 ---
 
-## 10 · Build order, if this is built
+## 10 · What was built
 
-1. `rulings.toml` schema + loader, with the same loudness discipline as `memory_gates.py`
-   (malformed ⇒ no rulings ⇒ halt; never a quiet fall-back).
-2. `.smokin/rulings.jsonl` writer, append-only, seq-numbered.
-3. Tier-2 invocation: one judge, closed outcome set, evidence list honoured exactly.
-4. Frontier computed from rulings rather than receipts — the one-line change that makes it real.
-5. Validator check: every `persona` in `rulings.toml` exists in `_ROSTER.md`; every `default` is
-   `halt`; every `outcomes` includes `insufficient-evidence`.
-6. Mutation-test each of the six failure modes in §8 before claiming any of them is prevented.
+| | | Where |
+|---|---|---|
+| 1 | `_RULINGS.toml` schema + loader — malformed ⇒ **no** rulings ⇒ halt, never a quiet fall-back | `bin/smokin_rulings.py` |
+| 2 | `.smokin/rulings.jsonl` — append-only, seq-numbered, reason mandatory | `append_ruling`, `standing` |
+| 3 | Tier-2 invocation — one judge, closed outcome set, evidence honoured exactly | `invoke_judge` |
+| 4 | The frontier computed from rulings, not receipts | `Plan.ruling_state`, `Plan.state_cheap` |
+| 5 | Validator check in Grillin | `scripts/validate-plan.py::check_rulings` |
+| 6 | Mutation tests for every §8 failure mode | `tests/test-rulings.py` |
+
+Two things the build changed from the design:
+
+- **`verdict.pass` became `verdict.passed`.** `pass` is a Python keyword, so `verdict.pass` can never
+  parse as an attribute — the field name in the original design was unimplementable. Caught by the
+  first test run.
+- **`when` is whitelisted by AST node type, not by pattern.** A call, a subscript, an f-string, a
+  comprehension and a walrus are all rejected structurally, which is the only way that stays true
+  when somebody writes something nobody thought of. An unknown field is an error at *load* time — a
+  typo that quietly evaluated to `False` would be a ruling that never fires on a plan that looks
+  judged and is not.
+
+### New surface
+
+```
+smokin rulings <plan>     resolve and print the judgement layer; exit 1 if it does not load
+smokin resume <plan>      clear a halt, after a human has read it
+```
+
+`smokin reset` **retires** rulings rather than deleting them — a retirement is appended, the ruling
+and its reason stay readable. Deleting them would make a reset the cheapest way to erase an
+inconvenient judgement, which is the trail this design exists to leave.

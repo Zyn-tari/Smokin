@@ -1,0 +1,113 @@
+# _RULINGS.toml — the judgement layer of the delegation node.
+#
+# The curator writes this file. The orchestrator obeys it and may not edit it.
+#
+# WHAT IT IS FOR. `smokin tick` advances a plan without anything staying alive:
+# it reads the plan off disk, dispatches, gates, and exits. What a tick cannot do
+# on its own is make a judgement call — and the calls that matter most ARE
+# judgements. Is this receipt trustworthy? Is this worker really blocked? Does
+# this failure mean re-dispatch or stop? This file declares which of those
+# questions may be asked in this plan, who is asked, on what evidence, and what
+# they are allowed to answer.
+#
+# OPT-IN BY FILE. Delete this file and the judgement layer is off — the tick
+# behaves exactly as it did before, and ● means the mechanical gate and nothing
+# more. Keep it and it binds.
+#
+# Check it with:  smokin rulings .
+
+# ── the policy ──────────────────────────────────────────────────────────────
+[policy]
+# What happens when a task passes its gate and NO declared class covers it.
+#
+#   "halt"   (default) — the node stops and asks a human. It does not decide
+#                        what it was not told to decide.
+#   "accept"           — the task advances on the gate alone.
+#
+# "accept" is a legitimate choice. It is required to be WRITTEN DOWN because a
+# plan that advances on gates alone should say so where a reviewer can see it,
+# rather than having it be the accident of nobody having written a rule.
+uncovered = "halt"
+
+
+# ── the classes ─────────────────────────────────────────────────────────────
+# One [[ruling]] per decision class. Every field is required.
+
+[[ruling]]
+# `class` — the decision's name. Unique. It appears in every ruling record, so
+# choose something a reviewer will still understand in six months.
+class = "receipt-trust"
+
+# `when` — when this ruling is required. Evaluated against files only, with a
+# fixed namespace; an unknown field is an error at LOAD time, not a silent false.
+#
+#   state                                       (always "gated" here)
+#   verdict.passed  verdict.exit
+#   receipt.claim  receipt.terminal  receipt.source  receipt.stale
+#   task.id  task.type  task.owner  task.runtime  task.dispatch
+#
+# Operators: == != in "not in" and or not. Nothing else parses.
+when = "verdict.passed and receipt.claim == 'done'"
+
+# `persona` — MUST appear in `_ROSTER.md`. The model and the effort come from
+# there, because that is the file that carries the REASON for the pairing. A
+# persona invented here is a persona nobody priced.
+persona = "adversary"
+
+# `evidence` — exactly what the judge is handed. Nothing else. This list is the
+# containment; a judge that can read the whole repository is a judge whose answer
+# you cannot reproduce.
+#
+# Known names: task.contract  receipt  verdict  worker.output
+#              transcript  plan  roster  herdr.state
+evidence = ["task.contract", "receipt", "verdict", "worker.output"]
+
+# `outcomes` — a CLOSED set. A judge that may return prose can return anything,
+# and the node would have to interpret it, which is judgement the node is not
+# allowed to have. Must include "insufficient-evidence": a judge with no way to
+# say "I cannot tell" will say something else instead.
+outcomes = ["accept", "reject", "insufficient-evidence"]
+
+# `default` — what happens if the judge cannot be reached, times out, writes
+# nothing, or answers outside the set. It MUST be "halt" and the loader rejects
+# anything else. An unreachable judge that quietly resolves to `accept` is a plan
+# that certifies itself while looking like it works.
+default = "halt"
+
+# Optional. Which runtime carries the judge (must exist in runtimes.json), and
+# how long it gets. An unanswered question is not an answer, so the budget
+# expiring is a halt, not a pass.
+runtime  = "claude"
+budget_s = 300
+
+
+# ── more classes, as the plan needs them ────────────────────────────────────
+# Uncomment and adapt. Do NOT add a class you have no intention of reading the
+# rulings from — every one of these costs a model call at the roster's price.
+
+# [[ruling]]
+# class    = "blocked-real"
+# when     = "receipt.claim == 'blocked'"
+# persona  = "health"
+# evidence = ["task.contract", "receipt", "worker.output", "herdr.state"]
+# outcomes = ["accept", "reject", "insufficient-evidence"]
+# default  = "halt"
+
+# [[ruling]]
+# class    = "failure-disposition"
+# when     = "receipt.terminal == 'reaped'"
+# persona  = "architect"
+# evidence = ["task.contract", "receipt", "transcript", "plan"]
+# outcomes = ["accept", "reject", "insufficient-evidence"]
+# default  = "halt"
+
+
+# ── Do NOT ──────────────────────────────────────────────────────────────────
+# - Do NOT declare a class you will not read. A ruling nobody reads is a model
+#   call you paid for and a decision nobody reviewed.
+# - Do NOT hand a judge `plan` or `roster` unless the question genuinely needs
+#   them. Wide evidence is how a judge starts answering a question you did not ask.
+# - Do NOT name the persona that DID the work as the persona that judges it.
+#   Grillin principle 8: never certify your own work.
+# - Do NOT set `uncovered = "accept"` to silence a halt you have not read. The
+#   halt is the mechanism telling you the plan grew a case nobody planned for.

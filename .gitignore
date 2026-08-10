@@ -1,15 +1,17 @@
-examples/demo-plan/.smokin/dispatch/
-examples/demo-plan/.smokin/spool/
-examples/demo-plan/.smokin/run.json
-examples/demo-plan/.smokin/ledger.jsonl
-examples/demo-plan/.smokin/doctor.json
-examples/demo-plan/tasks/*/.smokin/
-examples/demo-plan/tasks/*/RECEIPT.json
-examples/demo-plan/tasks/*/VERDICT.json
-examples/demo-plan/tasks/*/FINDINGS.md
 
 # Generated every tick — tracking them means the example is dirty after any run.
 # The README carries a rendered sample inline instead.
+*.pyc
+__pycache__/
+examples/demo-plan/.smokin/dispatch/
+examples/demo-plan/.smokin/doctor.json
+examples/demo-plan/.smokin/ledger.jsonl
+examples/demo-plan/.smokin/run.json
+examples/demo-plan/.smokin/spool/
+examples/demo-plan/.smokin/tick.lock
 examples/demo-plan/PROGRESS.md
 examples/demo-plan/STATUS.json
-examples/demo-plan/.smokin/tick.lock
+examples/demo-plan/tasks/*/.smokin/
+examples/demo-plan/tasks/*/FINDINGS.md
+examples/demo-plan/tasks/*/RECEIPT.json
+examples/demo-plan/tasks/*/VERDICT.json

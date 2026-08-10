@@ -90,15 +90,30 @@ verdict  T3  REFUTED
 | | |
 |---|---|
 | `smokin doctor <plan>` | probe every declared runtime, the filesystem and the shell; write `.smokin/doctor.json` |
-| `smokin tick <plan>` | one pass: reap · gate · dispatch · render. **Safe to run at any time, from anywhere** |
+| `smokin tick <plan>` | one pass: reap · gate · **judge** · dispatch · render. **Safe to run at any time, from anywhere** |
 | `smokin run <plan>` | tick until the plan is complete or stuck |
 | `smokin status <plan>` | one line: how many verified, what is ready |
 | `smokin present <plan>` | print `PROGRESS.md` |
 | `smokin reap <plan> [--close]` | force-reap overdue tasks; `--close` also tidies the pane |
-| `smokin reset <plan>` | retire the run — receipts, verdicts, artefacts, statuses |
+| `smokin rulings <plan>` | resolve and print the judgement layer, and the ledger it has written |
+| `smokin resume <plan>` | clear a halt, after a human has read it |
+| `smokin reset <plan>` | retire the run — receipts, verdicts, artefacts, statuses, rulings |
 
 **Exit codes:** `0` complete · `1` work in flight, tick again · `2` not a plan directory ·
-`3` stuck — nothing running and nothing ready.
+`3` stuck — nothing running and nothing ready · `4` **halted — a human has to read something**.
+
+### The delegation node
+
+Drop a `_RULINGS.toml` beside the plan and the tick gains a judgement layer: before a task counts as
+verified, a judge who wrote none of it is asked one question, on declared evidence, with a closed set
+of answers — and the ruling is written to `.smokin/rulings.jsonl` with its reason. **The frontier
+then advances on rulings, not receipts.** No file, no layer: the tick behaves exactly as before.
+
+The judge is named by persona; its model and effort come from `_ROSTER.md`, because that is the file
+that carries the reason for the pairing. An unreachable judge **halts**, and that is not
+configurable — one that quietly resolved to `accept` would be a plan certifying itself while looking
+like it works. See [DELEGATION-NODE.md](DELEGATION-NODE.md) and
+[`templates/_RULINGS.toml.template`](templates/_RULINGS.toml.template).
 
 ---
 
