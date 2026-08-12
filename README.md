@@ -5,13 +5,69 @@
 </p>
 
 <p align="center">
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#how-it-works">How it works</a> ·
+  <a href="#do-you-need-this">Do you need this?</a> ·
+  <a href="#sixty-seconds">Sixty seconds</a> ·
+  <a href="#when-you-need-the-fleet--how-tick-works">The fleet</a> ·
   <a href="#the-presenter">Presenter</a> ·
   <a href="#for-an-agent-reading-this">For agents</a> ·
   <a href="#honest-state">Honest state</a> ·
   <a href="EXPERIMENTS.md">Experiments</a>
 </p>
+
+---
+
+## Do you need this?
+
+| Your situation | Answer |
+|---|---|
+| **More than one worker at once** | **Yes.** That is what this is for. |
+| **One worker, or you are doing it by hand** | **Partly** — you want `smokin verify`, and nothing else here. |
+| You have no plan yet | Not yet. Write one first — see [Grillin](https://github.com/A-Pex97/grillin). |
+
+**At n=1, you are the receipt. `verify` is the second hand.**
+
+Your agent says it finished. `smokin verify` re-runs the task's own done-command *itself* and tells
+you whether that was true. It starts nothing, leaves nothing running, and never edits your
+`TASK.md`. That is the whole of what this does for one worker, and it is the part worth having
+first.
+
+> This section exists because two people in a row read this README, wrote a plan, ran it with the
+> one agent they already had, and skipped Smokin entirely — the second on a job built to need it.
+> Both then hand-checked their agent's claims, which is exactly what `verify` does. The idea was
+> welded to a fleet they did not have.
+
+---
+
+## Sixty seconds
+
+```bash
+smokin verify examples/demo-plan
+```
+
+Every task's own done-command is re-run, and you get one page — `PROGRESS.md` — saying which tasks
+are **actually** finished and which merely **claim** to be.
+
+```
+  verdict  T1  PASS
+  verdict  T2  REFUTED
+
+  1 of 2 verified · see PROGRESS.md
+```
+
+Nothing was started. Nothing is still running. Run it again and you get the same answer.
+
+---
+
+## The three states
+
+|  | Means |
+|---|---|
+| **◑ claimed** | the worker said it finished. **Nothing has checked that.** |
+| **● verified** | the task's *own* done-command was re-run by something that did not do the work, and passed |
+| **✗ refuted** | it claimed done; the command disagreed |
+
+Those are three different statements and the difference is the point. A claim is not evidence; it
+becomes evidence when a second hand runs the gate.
 
 ---
 
@@ -70,8 +126,9 @@ separate, later process.
 git clone git@github.com:A-Pex97/smokin.git
 export PATH="$PWD/smokin/bin:$PATH"
 
+smokin verify examples/demo-plan     # check a plan without starting anything
 smokin doctor examples/demo-plan     # what is actually installed on this machine
-smokin run    examples/demo-plan     # tick until complete or stuck
+smokin run    examples/demo-plan     # the fleet: tick until complete or stuck
 cat           examples/demo-plan/PROGRESS.md
 ```
 
@@ -89,6 +146,7 @@ verdict  T3  REFUTED
 
 | | |
 |---|---|
+| `smokin verify <plan>` | **start here.** Re-run every task's own done-command. Starts nothing, edits no `TASK.md`, spends no model calls |
 | `smokin doctor <plan>` | probe every declared runtime, the filesystem and the shell; write `.smokin/doctor.json` |
 | `smokin tick <plan>` | one pass: reap · gate · **judge** · dispatch · render. **Safe to run at any time, from anywhere** |
 | `smokin run <plan>` | tick until the plan is complete or stuck |
@@ -117,7 +175,10 @@ like it works. See [DELEGATION-NODE.md](DELEGATION-NODE.md) and
 
 ---
 
-## How it works
+## When you need the fleet — how `tick` works
+
+Everything below this line only matters once **more than one worker** is running. With one worker, `verify` above is
+the whole tool.
 
 Five steps, and each one exists because of a specific defect.
 
