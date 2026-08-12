@@ -80,8 +80,28 @@ P="$LAB/lock"; newplan "$P" 60
 wait
 chk "two racing ticks dispatch exactly once" \
     "$(cat "$LAB/a.txt" "$LAB/b.txt" | grep -c 'dispatch ')" "1"
-chk "the loser says so rather than failing" \
-    "$(cat "$LAB/a.txt" "$LAB/b.txt" | grep -c 'another tick holds the lock')" "1"
+# The previous assertion here counted the loser's message across those two runs.
+# That is not an invariant, it is an observation of a race — on a fast machine
+# the first tick finishes before the second starts, nobody loses, and a correct
+# tool fails its own test. It failed exactly that way on a server while passing
+# here. Hold the lock deliberately instead, so the branch is exercised every run.
+P="$LAB/held"; newplan "$P" 60
+mkdir -p "$P/.smokin"
+python3 - "$P/.smokin/tick.lock" <<'PY' &
+import fcntl, sys, time
+f = open(sys.argv[1], "w")
+fcntl.flock(f, fcntl.LOCK_EX)
+time.sleep(4)
+PY
+holder=$!
+sleep 1
+"$SMOKIN" tick "$P" > "$LAB/c.txt" 2>&1
+chk "a tick that cannot get the lock declines"        "$?" "0"
+chk "...and says so rather than failing silently" \
+    "$(grep -c 'another tick holds the lock' "$LAB/c.txt")" "1"
+chk "...and dispatches nothing while locked out" \
+    "$(grep -c 'dispatch ' "$LAB/c.txt")" "0"
+wait "$holder" 2>/dev/null
 
 # ── 5 · the emitter's mutex ─────────────────────────────────────────────────
 P="$LAB/dup"; newplan "$P" 60
