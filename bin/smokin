@@ -3,6 +3,7 @@
 smokin — an idempotent tick that dispatches a Grillin plan from disk.
 
     smokin doctor            probe the machine, write .smokin/doctor.json
+    smokin verify            run every task's own done-command. Starts nothing
     smokin tick              one pass: reap, gate, judge, dispatch, render
     smokin run               tick until the plan is finished or stuck
     smokin status            print the frontier
@@ -456,7 +457,7 @@ def reap(plan: Plan, close_panes=False):
     return out
 
 
-def take_verdict(plan: Plan, tid: str):
+def take_verdict(plan: Plan, tid: str, write_status: bool = True):
     """The tick re-runs the task's OWN done-command. A receipt is the agent's
     CLAIM; the verdict is the project's. Principle 8 one level down: a receipt
     may be a precondition of the gate, it may never BE the gate."""
@@ -472,7 +473,12 @@ def take_verdict(plan: Plan, tid: str):
              "why": "gate could not run (exit %d)" % r.returncode if blew else None,
              "stdout": (r.stdout or "")[-500:], "stderr": (r.stderr or "")[-500:]}
     (t.dir / "VERDICT.json").write_text(json.dumps(v, indent=1) + "\n")
-    t.set_status("DONE" if v["pass"] else "BLOCKED")
+    # `verify` passes write_status=False. At n=1 the human wrote TASK.md and
+    # probably has it open; silent edits to someone's own prose are hostile, and
+    # the rendered picture does not need it — Plan.state() reads the verdict
+    # before it looks at anything else, so the status line is not load-bearing.
+    if write_status:
+        t.set_status("DONE" if v["pass"] else "BLOCKED")
     ledger(plan, event="verdict", task=tid, **{"pass": v["pass"]})
     return v
 
@@ -585,6 +591,79 @@ def judge_pass(plan: Plan, rts: dict, dry=False):
                               f"{rec['outcome']!r}: {rec['because']} This is tier 3 — it needs a "
                               f"human, not another agent.")
     return made, None
+
+
+# ── verify — the tick with the fleet removed ────────────────────────────────
+
+RE_READER = re.compile(r"^\*\*Reader:\*\*", re.M | re.I)
+
+
+def verify(plan: Plan, only=None):
+    """Run each task's OWN done-command and record what happened. That is all.
+
+    Starts nothing, creates no pane, drains no spool, reaps nothing, judges
+    nothing. It takes the tick lock so it cannot race a real tick.
+
+    WHY THIS EXISTS. Two users in a row wrote a plan, executed it with the one
+    agent they already had, and never touched Smokin — the second on a job built
+    to need it. The idea that would have helped both of them needs no fleet at
+    all: the worker's claim is not evidence until something else re-runs the
+    check. It was welded to dispatch, panes and a reaper they did not need, so
+    they skipped the whole thing.
+
+    At n=1 there is no worker to emit a receipt. YOU are the receipt, and this is
+    the second hand.
+    """
+    plan.priv.mkdir(parents=True, exist_ok=True)
+    lock = open(plan.priv / "tick.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another tick holds the lock — nothing to do")
+        return 0
+
+    held = halted(plan)
+    if held:
+        print_halt(held)
+        return 4
+
+    ids = [only] if only else sorted(plan.tasks)
+    verdicted = []
+    for tid in ids:
+        if tid not in plan.tasks:
+            print(f"smokin: no such task: {tid}", file=sys.stderr)
+            return 2
+        v = take_verdict(plan, tid, write_status=False)
+        verdicted.append(tid)
+        print(f"  verdict  {tid}  {'PASS' if v['pass'] else 'REFUTED'}")
+
+    plan.__init__(plan.root)
+
+    # Independence cannot be established from here, so say so rather than let a
+    # green line imply it. The gate checks the declaration; only something that
+    # dispatched the work can check the actor, and nothing dispatched here.
+    for tid in sorted(plan.tasks):
+        if RE_READER.search(plan.tasks[tid].path.read_text(errors="replace")):
+            print(f"  note     {tid} is declared adversarial. Nothing ran it here, so its "
+                  f"independence is unverified.")
+
+    st = render_status(plan, [], verdicted, [], [], (), None)
+    write_progress(plan, st)
+
+    if plan.rules.active and not plan.rules.error:
+        waiting = [t for t in plan.tasks if plan.ruling_state(t) == "judging"]
+        if waiting:
+            print(f"\n{len(waiting)} task(s) need a ruling; `smokin tick` is what asks. "
+                  f"verify spends no model calls.")
+
+    ready = plan.frontier()
+    if len(ready) > 1:
+        print(f"\n{len(ready)} tasks are ready at the same time ({', '.join(ready)}) — "
+              f"that is what `smokin tick` is for.")
+
+    ver = st["counts"]["verified"]
+    print(f"\n{ver} of {st['total']} verified · see PROGRESS.md")
+    return 0 if plan.tasks and ver == st["total"] else 1
 
 
 # ── the tick ────────────────────────────────────────────────────────────────
@@ -1030,12 +1109,13 @@ def resume(plan: Plan):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["doctor", "tick", "run", "status", "present",
+    ap.add_argument("cmd", choices=["doctor", "tick", "verify", "run", "status", "present",
                                     "reap", "reset", "rulings", "resume"])
     ap.add_argument("plan", nargs="?", default=".")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--close", action="store_true", help="reap also closes the pane (SIGHUP)")
     ap.add_argument("--run", default=None)
+    ap.add_argument("--task", default=None, help="verify: gate one task instead of all")
     ap.add_argument("--max-ticks", type=int, default=200)
     ap.add_argument("--interval", type=float, default=3.0)
     a = ap.parse_args()
@@ -1068,6 +1148,8 @@ def main():
             print(f"{c.get('verified',0)}/{st['total']} verified · "
                   f"frontier: {', '.join(st['frontier']) or '—'}")
         return 0
+    if a.cmd == "verify":
+        return verify(plan, a.task)
     if a.cmd == "tick":
         return tick(plan, a.dry_run, a.close)
     if a.cmd == "run":
