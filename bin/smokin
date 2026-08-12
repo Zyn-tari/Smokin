@@ -356,7 +356,13 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            "dispatch": decision, "clause": clause, "runtime": t.runtime,
            "started": now(), "started_ns": time.time_ns(),
            "started_epoch": time.time(), "budget_s": t.budget,
-           "placement": None, "pid_or_pane": None}
+           "placement": None, "pid_or_pane": None,
+           # WHICH AGENT INSTANCE got this task. The gate can only check that an
+           # adversarial task DECLARES a different owner; only something that
+           # dispatched can know who actually ran it. inproc spawns a fresh
+           # headless process per task, so independence is free there — that is a
+           # real property, not a gap. It is pane REUSE that collapses it.
+           "session": None}
 
     if dry:
         rec["dry"] = True
@@ -370,6 +376,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
         pane = herdr_pane(plan, t)
         rec["placement"] = pane
         rec["pid_or_pane"] = pane and pane.get("pane")
+        rec["session"] = pane and pane.get("pane")
         # the dispatch record is written BEFORE launch: that is what makes a
         # missing receipt mean something rather than being indistinguishable
         # from never-dispatched.
@@ -390,6 +397,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     rec["pid_or_pane"] = p.pid
+    rec["session"] = f"pid:{p.pid}"        # a fresh process = a fresh context
     (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
     return decision, f"pid {p.pid}"
 
@@ -717,6 +725,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
     for tid in plan.frontier():
         t = plan.tasks[tid]
         decision, _ = t.route()
+        adversarial = bool(RE_READER.search(t.path.read_text(errors="replace")))
         if decision == "pane" and live_panes >= ceiling:
             queued.append((tid, "pane-ceiling"))
             continue
@@ -734,6 +743,17 @@ def tick(plan: Plan, dry=False, close_panes=False):
         t.set_status("IN PROGRESS")
         dispatched.append((tid, d, where))
         ledger(plan, event="dispatched", task=tid, dispatch=d, where=str(where))
+        if adversarial:
+            # Say where the reader ran, so independence is READABLE rather than
+            # asserted. Both dispatch paths give a fresh context — inproc spawns a
+            # new process, pane splits a new pane — so under Smokin's own dispatch
+            # independence holds by construction. That is worth stating plainly
+            # instead of building an enforcement that can never fire. It is the
+            # case Smokin did NOT dispatch — a human relaying every task to one
+            # agent — that collapses it, and only `smokin verify` speaks to that.
+            sess = (plan.dispatch_rec(tid) or {}).get("session")
+            print(f"           {tid} is the reader; it got its own session ({sess}), "
+                  f"separate from every other task in this run.")
 
     plan.__init__(plan.root)
     st = render_status(plan, reaped, list(verdicts), dispatched, queued, rulings, None)
