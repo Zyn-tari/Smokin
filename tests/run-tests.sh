@@ -133,6 +133,14 @@ chk "doctor works on a plan with no local runtimes.json" "$?" "0"
 n="$("$SMOKIN" doctor "$P" 2>/dev/null | grep -c '^runtime ')"
 chk "...and reports the shipped runtimes, not the comment" "$([ "$n" -ge 4 ] && echo yes)" "yes"
 
+# ── 6c · verify, the tick with the fleet removed ────────────────────────────
+echo
+if python3 "$ROOT/tests/test-verify.py" > "$LAB/verify.out" 2>&1; then
+  ok "verify: $(grep -c PASS "$LAB/verify.out") checks"
+else
+  bad "verify" "see below"; cat "$LAB/verify.out"
+fi
+
 # ── 7 · the delegation node ─────────────────────────────────────────────────
 # Its own harness, because it mutates six named failure modes rather than
 # walking a happy path. Run here so one command still covers the whole tool.
