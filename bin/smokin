@@ -319,9 +319,20 @@ def ledger(plan: Plan, **kw):
 # ── dispatch ────────────────────────────────────────────────────────────────
 
 def runtimes(plan: Plan):
+    """The capability table. Filtered to rows — the shipped template carries a
+    `_comment` key whose value is a LIST, and `doctor` walked every key and
+    crashed on it. It never showed up in the tests because the demo plan ships
+    its own runtimes.json, so the fallback path — the one every real plan takes
+    — was the one nothing exercised. Found by running doctor on a server."""
     for p in (plan.priv / "runtimes.json", HERE.parent / "templates" / "runtimes.json"):
         if p.is_file():
-            return json.loads(p.read_text())
+            try:
+                raw = json.loads(p.read_text())
+            except ValueError as e:
+                raise SystemExit(f"smokin: {p} is not valid JSON — {e}")
+            if not isinstance(raw, dict):
+                raise SystemExit(f"smokin: {p} must be an object of runtime rows")
+            return {k: v for k, v in raw.items() if isinstance(v, dict)}
     return {}
 
 

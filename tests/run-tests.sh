@@ -103,6 +103,16 @@ printf '{"terminal":"ok","exit":0}' | SMOKIN_PLAN="$P" "$ROOT/bin/smokin-emit" T
 v="$(python3 -c "import json;print(json.load(open('$P/tasks/T1/VERDICT.json'))['pass'])" 2>/dev/null)"
 chk "an agent claiming done is refuted by the gate" "$v" "False"
 
+# ── 6b · doctor on the path every REAL plan takes ───────────────────────────
+# A plan with no .smokin/runtimes.json falls back to the shipped template. Every
+# test above ships its own, so that fallback was the one branch nothing ran — and
+# it crashed on the template's own `_comment` key. Found on a server, not here.
+P="$LAB/nortsjson"; rm -rf "$P"; mkdir -p "$P/tasks"
+"$SMOKIN" doctor "$P" >/dev/null 2>&1
+chk "doctor works on a plan with no local runtimes.json" "$?" "0"
+n="$("$SMOKIN" doctor "$P" 2>/dev/null | grep -c '^runtime ')"
+chk "...and reports the shipped runtimes, not the comment" "$([ "$n" -ge 4 ] && echo yes)" "yes"
+
 # ── 7 · the delegation node ─────────────────────────────────────────────────
 # Its own harness, because it mutates six named failure modes rather than
 # walking a happy path. Run here so one command still covers the whole tool.
