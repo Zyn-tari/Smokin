@@ -366,6 +366,29 @@ produced that conclusion launched an interactive TUI and waited for the budget �
 *"an idle TUI does not exit"* and reported it as *"cannot emit."* Every observation true, the
 conclusion wrong.
 
+### The measurement this section owes you
+
+`verify` exists because of a count, and the count has not moved yet.
+
+**Four operators in a row** — two watched trials and two real rounds on a live
+project — wrote a plan, executed it, and hand-rolled their own verification
+rather than reach for this tool. The fourth split a 2,000-line changelog and
+verified it by reconstructing the file from its shards and diffing against a
+backup taken before the split. That is precisely the receipt-versus-verdict
+split, performed by hand, by someone who had this installed.
+
+Their reasoning, unprompted, was better than this README's: *"the splitter's own
+pre-write guard proves the plan was sound, not that the write was."*
+
+So the idea transfers and the tool does not. `verify` is the response — it
+removes the fleet, which was the stated reason all four gave for skipping it.
+Whether that is enough is **unmeasured**, and the honest next question is not
+"why did they not use it" but whether a plan-shaped wrapper around *run these
+checks and tell me which failed* is worth more than the four-line loop it
+replaces. If the count is still four after another round, the answer is no and
+this section should say so.
+
+
 ### Phase 8's obligation is unmet, and that is deliberate
 
 Grillin phase 8 says *choose the substrate by measurement, not preference*, and lists five
