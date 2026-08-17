@@ -485,4 +485,17 @@ workers are `sleep 1` — would be measuring the fixture and calling it a measur
 
 ---
 
-<p align="center"><sub>MIT · built alongside <a href="https://github.com/A-Pex97/grillin">Grillin</a></sub></p>
+---
+
+## Licence
+
+**The ideas are free. The tools are free for noncommercial use.**
+
+| | Licence | What it means |
+|---|---|---|
+| **The documents** — every `.md`, [`SMOKIN.json`](SMOKIN.json), the templates, the demo plan | [CC BY 4.0](LICENSE-DOCS) | Use it anywhere, including commercially. The one condition is **attribution**. |
+| **The tools** — [`bin/`](bin/), the hook, the tests | [PolyForm Noncommercial 1.0.0](LICENSE) | Free for personal, academic, research and non-profit use. **Commercial use needs a licence** — open an issue. |
+
+If it executes, it's PolyForm. If you read it, it's CC BY.
+
+<p align="center"><sub>built alongside <a href="https://github.com/A-Pex97/grillin">Grillin</a></sub></p>
