@@ -1,0 +1,56 @@
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+Copyright 2026 A-Pex97
+
+The METHOD is licensed separately from the TOOLS, on purpose.
+
+  The method — the prose, the examples, the specs — is CC BY 4.0. Use it
+  anywhere, including commercially, including inside a product. Change it.
+  Build on it. The one condition is attribution: say where it came from.
+
+  The tools — anything that executes — are PolyForm Noncommercial 1.0.0. See
+  LICENSE. Commercial use of those needs a licence from the copyright holder.
+
+WHY THE SPLIT
+
+The valuable part of this repository is the reasoning, and reasoning does not
+stay put. People who had never read these documents re-invented the central
+idea — that a worker's claim is not evidence until something else re-runs the
+check — entirely unprompted, and that is the point rather than a leak. So the method is free, and the
+condition is credit.
+
+The tools are a different question. They are the part someone could ship inside
+a product, and that is the conversation worth having in advance.
+
+WHAT IS COVERED BY THIS FILE (CC BY 4.0)
+
+  *.md                  every document in the repository — README, DESIGN,
+                        DELEGATION-NODE, EXPERIMENTS
+  SMOKIN.json           the machine-readable spec
+  templates/*.md        the substrate contract
+  templates/*.toml*     the rulings and invariants templates
+  templates/*.json      runtimes.json and the hook wiring
+  examples/             the demo plan
+
+WHAT IS COVERED BY LICENSE (PolyForm Noncommercial 1.0.0)
+
+  bin/                  smokin, smokin-run, smokin-emit, and the modules
+                        beside them
+  tests/                the calibration harness
+  templates/*.sh        verify-on-stop.sh, and any shell template that runs
+
+THE RULE, IF A FILE IS NOT LISTED
+
+  If it executes, it is under LICENSE. If you read it, it is under this file.
+
+COMMERCIAL LICENSING
+
+For a commercial licence to the tools, open an issue or contact the copyright
+holder through the repository.
+
+FULL TEXT
+
+  CC BY 4.0     https://creativecommons.org/licenses/by/4.0/legalcode
+  Summary       https://creativecommons.org/licenses/by/4.0/
+
+This file is a statement of the licence that applies, not a substitute for its
+text. Where the two differ, the full text at the link above governs.
