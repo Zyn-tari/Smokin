@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "Wiring for verify-on-stop.sh. Copy the Stop block into your settings.json —",
+    "~/.claude/settings.json for every project, or .claude/settings.json for one.",
+    "",
+    "WHAT IT DOES. The moment an agent says it has finished, this re-runs that",
+    "task's own done-command itself and tells you whether the claim survived.",
+    "It starts nothing, edits no TASK.md, spends no model calls, and always",
+    "exits 0 — a hook that can wedge a session gets deleted, and takes the",
+    "useful part with it.",
+    "",
+    "WHY A HOOK AND NOT A COMMAND. Across five trials and five real jobs the",
+    "planning gate got run and verify did not. The gate has a pre-commit hook",
+    "putting it in the path; verify was something you had to remember at the",
+    "exact moment believing the agent is easier. Same idea, same value, one in",
+    "the path and one on the shelf, and only one of them got used.",
+    "",
+    "INSTALL:",
+    "  mkdir -p ~/.claude/hooks",
+    "  cp templates/verify-on-stop.sh ~/.claude/hooks/",
+    "  chmod +x ~/.claude/hooks/verify-on-stop.sh",
+    "then merge the Stop block below into settings.json. MERGE — do not replace",
+    "the file. Other tools put hooks there too, and overwriting them is a silent",
+    "removal of somebody else's safety net.",
+    "",
+    "TURN IT OFF without unwiring: SMOKIN_VERIFY_ON_STOP=0"
+  ],
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/verify-on-stop.sh",
+            "timeout": 90
+          }
+        ]
+      }
+    ]
+  }
+}

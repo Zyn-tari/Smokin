@@ -133,6 +133,54 @@ chk "doctor works on a plan with no local runtimes.json" "$?" "0"
 n="$("$SMOKIN" doctor "$P" 2>/dev/null | grep -c '^runtime ')"
 chk "...and reports the shipped runtimes, not the comment" "$([ "$n" -ge 4 ] && echo yes)" "yes"
 
+# ── 6b2 · ONE task, no plan around it ───────────────────────────────────────
+# The precondition used to be a plan directory, and that precondition was the
+# reason `verify` went unused: the thing worth having at n=1 was gated behind
+# authoring a plan first. A lone TASK.md is enough to re-run a done-command.
+P="$LAB/lone/T1"; rm -rf "$LAB/lone"; mkdir -p "$P"
+{ echo "# T1 — a lone task"; echo
+  echo "**Status:** DONE"; echo "**Owner:** you"; echo
+  echo "## What you own"; echo '`.`'; echo
+  echo "## Steps"; echo "1. work"; echo
+  echo "## Done means"; echo '```'; echo "test -s FINDINGS.md"; echo '```'; echo
+  echo "## Do NOT"; echo "- Do NOT stray."
+} > "$P/TASK.md"
+
+"$SMOKIN" verify "$P" >/dev/null 2>&1
+chk "a lone TASK.md can be verified — no plan needed"    "$?" "1"
+chk "...and the agent's empty claim is REFUTED" \
+    "$(python3 -c "import json;print(json.load(open('$P/VERDICT.json'))['pass'])" 2>/dev/null)" "False"
+
+printf 'real findings\n' > "$P/FINDINGS.md"
+out="$("$SMOKIN" verify "$P/TASK.md" 2>&1)"; rc=$?
+chk "...pointing straight at the TASK.md works too"      "$rc" "0"
+# The verdict was written to the task dir and counted from root/tasks/<id>/ —
+# the same path in a plan, a different one here. It printed PASS then 0 of 1.
+chk "...and the summary AGREES with the verdict" \
+    "$(echo "$out" | grep -c '1 of 1 verified')" "1"
+chk "a lone task cannot be ticked, and says so" \
+    "$("$SMOKIN" tick "$P" 2>&1 | grep -c 'single task, not a plan')" "1"
+
+# ── 6b3 · the hook that fires verify when an agent says done ────────────────
+# The hook is the adoption mechanism, so a hook that silently does nothing is
+# the whole feature failing quietly. Both directions, plus the two ways it is
+# allowed to stay silent.
+HOOK="$ROOT/templates/verify-on-stop.sh"
+export PATH="$ROOT/bin:$PATH"
+rm -f "$P/FINDINGS.md" "$P/VERDICT.json"
+o="$(cd "$P" && echo '{}' | bash "$HOOK" 2>/dev/null)"
+chk "hook reports a refuted claim"      "$(echo "$o" | grep -c 'REFUTED')" "1"
+printf 'real\n' > "$P/FINDINGS.md"
+o="$(cd "$P" && echo '{}' | bash "$HOOK" 2>/dev/null)"
+chk "hook reports a surviving claim"    "$(echo "$o" | grep -c '1 of 1 verified')" "1"
+o="$(cd "$P" && echo '{}' | SMOKIN_VERIFY_ON_STOP=0 bash "$HOOK" 2>/dev/null)"
+chk "hook can be switched off"          "$(printf '%s' "$o" | wc -c)" "0"
+o="$(cd "$LAB" && echo '{}' | bash "$HOOK" 2>/dev/null)"
+chk "hook is silent where there is nothing to verify" "$(printf '%s' "$o" | wc -c)" "0"
+# Never non-zero. A Stop hook that exits non-zero is a session that cannot end.
+(cd "$P" && echo '{}' | bash "$HOOK" >/dev/null 2>&1)
+chk "hook always exits 0"               "$?" "0"
+
 # ── 6c · verify, the tick with the fleet removed ────────────────────────────
 echo
 if python3 "$ROOT/tests/test-verify.py" > "$LAB/verify.out" 2>&1; then

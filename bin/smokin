@@ -167,6 +167,19 @@ class Plan:
             for d in sorted(td.iterdir()):
                 if d.is_dir() and (d / "TASK.md").is_file():
                     self.tasks[d.name] = Task(d)
+        elif (root / "TASK.md").is_file():
+            # ONE TASK, NO PLAN AROUND IT. The precondition used to be a plan
+            # directory, and that precondition was the reason `verify` went
+            # unused: the thing worth having at n=1 — your agent said done, was
+            # it? — was gated behind first authoring a plan, at the exact moment
+            # nobody wants to. A lone TASK.md is enough to re-run a
+            # done-command, so it is now enough to use this.
+            #
+            # Read-only commands only; main() refuses to tick or dispatch one of
+            # these. Running a fleet out of a directory with no plan is the
+            # ceremony-free path to exactly the mess the plan directory prevents.
+            self.tasks[root.name] = Task(root)
+        self.single = not td.is_dir() and bool(self.tasks)
         # The judgement layer, read once per construction. `standing` is the
         # ruling that currently holds for each (class, task); the ledger keeps
         # every superseded one, so a re-judge leaves a trail.
@@ -190,8 +203,21 @@ class Plan:
             {"run": rid, "started": now(), "plan_root": str(self.root)}, indent=1) + "\n")
         return rid
 
+    def task_dir(self, tid) -> Path:
+        """Where a task's artefacts live.
+
+        Not `root/tasks/<id>/`. That is the same path in a plan directory and a
+        DIFFERENT one for a lone TASK.md, where the task folder IS the root —
+        and take_verdict has always written to the task's own dir. The two
+        agreed for as long as a plan was the only way in, so the coupling was
+        invisible until it wasn't: verify printed PASS and then `0 of 1
+        verified`, because the verdict was written to one path and counted from
+        another."""
+        t = self.tasks.get(tid)
+        return t.dir if t else self.root / "tasks" / tid
+
     def receipt(self, tid):
-        p = self.root / "tasks" / tid / "RECEIPT.json"
+        p = self.task_dir(tid) / "RECEIPT.json"
         if not p.is_file():
             return None
         try:
@@ -207,7 +233,7 @@ class Plan:
         return r
 
     def verdict(self, tid):
-        p = self.root / "tasks" / tid / "VERDICT.json"
+        p = self.task_dir(tid) / "VERDICT.json"
         try:
             return json.loads(p.read_text())
         except (OSError, ValueError):
@@ -1356,10 +1382,26 @@ def main():
     a = ap.parse_args()
 
     root = Path(a.plan).resolve()
-    if not (root / "tasks").is_dir():
-        print(f"smokin: {root} has no tasks/ — not a plan", file=sys.stderr)
+    # `smokin verify path/to/TASK.md` — point it straight at the file. The task
+    # folder is its parent, and that folder becomes the root.
+    if root.is_file() and root.name == "TASK.md":
+        root = root.parent
+    if not (root / "tasks").is_dir() and not (root / "TASK.md").is_file():
+        print(f"smokin: {root} has neither tasks/ nor a TASK.md — nothing to work with",
+              file=sys.stderr)
         return 2
     plan = Plan(root)
+
+    # A lone task can be CHECKED but not RUN. Dispatching out of a directory with
+    # no plan around it is how you get a fleet nobody can resume — the thing the
+    # plan directory exists to prevent. Say which commands apply rather than
+    # failing with a stack trace or, worse, quietly doing it.
+    READ_ONLY = {"verify", "doctor", "status", "present", "invariants"}
+    if getattr(plan, "single", False) and a.cmd not in READ_ONLY:
+        print(f"smokin: {root} is a single task, not a plan — `{a.cmd}` needs a plan "
+              f"directory with tasks/. Available here: {', '.join(sorted(READ_ONLY))}.",
+              file=sys.stderr)
+        return 2
 
     if a.cmd == "doctor":
         return doctor(plan)

@@ -22,7 +22,8 @@
 |---|---|
 | **More than one worker at once** | **Yes.** That is what this is for. |
 | **One worker, or you are doing it by hand** | **Partly** — you want `smokin verify`, and nothing else here. |
-| You have no plan yet | Not yet. Write one first — see [Grillin](https://github.com/A-Pex97/grillin). |
+| **You have no plan — just one task an agent claims it finished** | **Yes.** `smokin verify path/to/TASK.md`. No plan directory required, and there is a hook that does it for you. |
+| You have no plan and no task file either | Write one first — see [Grillin](https://github.com/A-Pex97/grillin). A `## Done means` you can re-run is the smallest unit this works on. |
 
 **At n=1, you are the receipt. `verify` is the second hand.**
 
@@ -55,6 +56,41 @@ are **actually** finished and which merely **claim** to be.
 ```
 
 Nothing was started. Nothing is still running. Run it again and you get the same answer.
+
+**And you don't need a plan for it.** Point it at a lone `TASK.md` — the folder, or the file:
+
+```bash
+smokin verify path/to/TASK.md
+```
+
+That precondition used to be the reason nobody used this. The thing worth having at n=1 was
+gated behind authoring a plan directory first, at the exact moment nobody wants to.
+
+### Make it fire by itself
+
+```bash
+mkdir -p ~/.claude/hooks && cp templates/verify-on-stop.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/verify-on-stop.sh
+# then merge templates/hooks.json.template into your settings.json
+```
+
+Now the moment an agent says it has finished, its own done-command is re-run and you are told
+whether the claim survived:
+
+```
+⚠ smokin verify: 1 REFUTED — T3. The claim of done did not survive re-running
+  the task's own done-command.
+```
+
+It never blocks, never edits your `TASK.md`, and always exits 0 — a hook that can wedge a
+session gets deleted and takes the useful part with it. `SMOKIN_VERIFY_ON_STOP=0` turns it off.
+
+> **Why a hook at all.** Across five trials and five real jobs, the planning gate got run and
+> `verify` did not — and it was never the idea that failed to land. People who had never read
+> this README re-invented *"check the claim with something that did not do the work"* on their
+> own. The gate has a pre-commit hook putting it **in the path**. `verify` was a command you
+> had to remember at the exact moment believing the agent is easier. Same idea, same value,
+> one on the shelf and one in the way — and only one of them got used.
 
 ---
 
@@ -361,6 +397,8 @@ you cannot reconstruct it from the plan directory, it does not exist.
 | [`SMOKIN.json`](SMOKIN.json) | machine-readable spec. Hand it to an agent |
 | [`templates/_SMOKIN.md.template`](templates/_SMOKIN.md.template) | the substrate contract a plan copies in |
 | [`templates/runtimes.json`](templates/runtimes.json) | the capability table — the only file that knows a vendor's flags |
+| [`templates/verify-on-stop.sh`](templates/verify-on-stop.sh) | **the hook.** Re-runs the gate the moment an agent claims done. Never blocks, always exits 0 |
+| [`templates/hooks.json.template`](templates/hooks.json.template) | the wiring for it — merge into settings.json, do not replace |
 | [`EXPERIMENTS.md`](EXPERIMENTS.md) | the three experiments the design was blocked on, with commands and output |
 | [`DESIGN.md`](DESIGN.md) | why it is shaped like this, and what three adversarial passes broke |
 | [`examples/demo-plan`](examples/demo-plan) | a runnable three-task plan; T3's gate fails on purpose |
