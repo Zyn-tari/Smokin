@@ -702,6 +702,68 @@ periods. Count moves 25 → 28.
 
 ---
 
+## 7b · Plan-level invariants — what the plan must not break
+
+> **Numbered 7b, not 8.** §§8–12 are cited by number from other files and from code. Renumbering
+> them to make room would break those citations to gain nothing, so this sits beside the
+> non-negotiables it extends. Same trade Grillin's `OPERATING-THE-PLAN.md` made for the same reason.
+
+Everything else in this document measures **completion**: did the task finish, was its claim true,
+did its own gate pass. Nothing measures **blast radius** — what a task broke on its way to passing.
+A task can satisfy `## Done means` perfectly and take a neighbour down doing it, and every mechanism
+described above will report success, because no done-command is pointed at anything the task was not
+supposed to touch.
+
+`_INVARIANTS.toml` is that reading. Opt-in by file, at the plan root, `[[invariant]]` per entry —
+the same shape and the same discipline as `_RULINGS.toml`:
+
+- **A missing file means the layer is off**, and nothing changes.
+- **A file that exists and is broken is LOUD and refuses to run.** Half an invariant set is a wrong
+  invariant set, and a plan guarded by rules nobody wrote is worse than one guarded by none.
+- **`because` is mandatory.** The person who reads the halt is not the person who wrote the command.
+
+Each invariant is a command, run once before the plan moves to capture a **baseline**, then re-run
+at every tick boundary and by `smokin verify`. The default mode is `unchanged` — no literal is
+pinned, because nobody knows what the right answer looks like, only that it must be the *same*
+answer afterwards. `equals` and `matches` pin a literal where one is known, and **a pinned
+expectation is checked at baseline too**: one already false before the plan runs refuses the
+capture, because halting on it at tick 2 would blame the plan for something it did not break.
+
+**A break is a halt, not a warning.** The evidence rides on `HALT.json` so it survives a re-render.
+
+**Where it came from.** A deploy in which `certbot` silently added one `listen` directive, making a
+new vhost the default for loopback HTTPS and serving two neighbouring sites the wrong certificate.
+Every task in that job passed its own check. No done-command anyone would write was ever going to
+look at the neighbours' certificate subject line, because the neighbours were not the work.
+
+**`curl` is allowed here and barred from a done-command** (§7 non-negotiable 3). That is deliberate
+and the reason is worth stating: in a gate, `curl` tests the network instead of the work; in an
+invariant, the network *is* the reading. Agent binaries stay barred in both — an invariant that
+shells out to an agent measures whether the tool is installed, forever.
+
+**Editing the file mid-run halts** rather than silently re-baselining. `smokin invariants <plan>
+--recapture` is the ceremony and it goes in the ledger; silently re-baselining is the node quietly
+becoming the curator, which is the first failure mode in `DELEGATION-NODE.md` §8.
+
+**The honest limits**, stated here rather than in a footnote:
+
+- **A baseline taken late records the damage as normal.** If the plan has already run, capture
+  measures the broken state and calls it correct.
+- **A probe is trusted to be read-only.** Nothing verifies that; a command that mutates is a
+  measurement that changes what it measures.
+- **An unchanged reading is not a correct reading.** It is the same reading. That distinction is the
+  one that failed on the reference deploy, where a real 404 was asserted as a cause it did not have.
+
+**Grillin gates the declaration; Smokin owns the execution.** `check_invariants` in
+`validate-plan.py` refuses a `_INVARIANTS.toml` that would load-fail, so an author finds out before
+handover rather than at tick 1 — and it refuses one more thing this side cannot see: an invariant
+whose command is a task's own done-command, which is a completion check wearing an invariant's
+clothes. The two validators are asserted against each other by
+`grillin/tests/test-config-contract.py`; on its first run that assertion found a real divergence in
+the roster lookup, which is what it is for.
+
+---
+
 ## 8 · Where it lands in Grillin
 
 **Grillin is untouched by this document.** Below is the exact change set a future implementation

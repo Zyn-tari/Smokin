@@ -153,6 +153,20 @@ else
   cat "$LAB/rulings.out"
 fi
 
+# ── 8 · plan-level invariants ───────────────────────────────────────────────
+# Everything above measures COMPLETION — did the task finish, was the claim
+# true. Nothing above measures BLAST RADIUS: what a task broke on its way to
+# passing its own gate. Same harness shape as 7, because the claim is the same
+# kind of claim and deserves the same kind of proof.
+echo
+if python3 "$ROOT/tests/test-invariants.py" > "$LAB/invariants.out" 2>&1; then
+  n=$(grep -c 'PASS' "$LAB/invariants.out")
+  ok "plan invariants: $n blast-radius checks"
+else
+  bad "plan invariants" "see below"
+  cat "$LAB/invariants.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

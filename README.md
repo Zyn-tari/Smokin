@@ -154,6 +154,7 @@ verdict  T3  REFUTED
 | `smokin present <plan>` | print `PROGRESS.md` |
 | `smokin reap <plan> [--close]` | force-reap overdue tasks; `--close` also tidies the pane |
 | `smokin rulings <plan>` | resolve and print the judgement layer, and the ledger it has written |
+| `smokin invariants <plan>` | print the plan-level invariants and their baseline; `--recapture` re-takes it, and says so in the ledger |
 | `smokin resume <plan>` | clear a halt, after a human has read it |
 | `smokin reset <plan>` | retire the run — receipts, verdicts, artefacts, statuses, rulings |
 
@@ -172,6 +173,26 @@ that carries the reason for the pairing. An unreachable judge **halts**, and tha
 configurable — one that quietly resolved to `accept` would be a plan certifying itself while looking
 like it works. See [DELEGATION-NODE.md](DELEGATION-NODE.md) and
 [`templates/_RULINGS.toml.template`](templates/_RULINGS.toml.template).
+
+### Plan-level invariants — what the plan must not break
+
+Everything above measures **completion**: did the task finish, was its claim true. Nothing above
+measures **blast radius** — what a task broke on the way to passing its own gate. No done-command
+is ever pointed at something the task was not supposed to touch.
+
+Drop an `_INVARIANTS.toml` beside the plan and each declared reading is captured once as a
+baseline, then re-read at every tick boundary and by `verify`. **A break halts the plan** — it is
+not a warning, and the evidence rides on `HALT.json` so it survives a re-render. No file, no layer.
+
+> The incident: `certbot` silently added one `listen` directive, made a new vhost the default for
+> loopback HTTPS, and served two neighbouring sites the wrong certificate. Every task passed its
+> own check. Nobody's done-command was ever going to look at the neighbours' certificate, because
+> the neighbours were not the work.
+
+Honest limits, stated rather than footnoted: a baseline taken late records the damage as normal; a
+probe is trusted to be read-only and nothing verifies that; and an unchanged reading is not a
+*correct* reading, only the same one. See [DESIGN.md §7b](DESIGN.md) and
+[`templates/_INVARIANTS.toml.template`](templates/_INVARIANTS.toml.template).
 
 ---
 
@@ -343,7 +364,8 @@ you cannot reconstruct it from the plan directory, it does not exist.
 | [`EXPERIMENTS.md`](EXPERIMENTS.md) | the three experiments the design was blocked on, with commands and output |
 | [`DESIGN.md`](DESIGN.md) | why it is shaped like this, and what three adversarial passes broke |
 | [`examples/demo-plan`](examples/demo-plan) | a runnable three-task plan; T3's gate fails on purpose |
-| [`tests/run-tests.sh`](tests/run-tests.sh) | 14 checks including crash recovery — `14 passed, 0 failed` |
+| [`DELEGATION-NODE.md`](DELEGATION-NODE.md) | the judgement layer: four tiers, and what the node may never decide |
+| [`tests/run-tests.sh`](tests/run-tests.sh) | the calibration harness — crash recovery, the emitter mutex, `verify`, rulings and invariants. `21 passed, 0 failed` |
 
 **Requires** `python3` (stdlib only) and `bash`. `herdr` is **optional** — without it panes are
 unavailable and everything else works. No packages, no daemon, no database.

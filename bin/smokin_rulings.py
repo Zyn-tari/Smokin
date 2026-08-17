@@ -83,7 +83,10 @@ EVIDENCE_FILES = {
                                          for n in ("FINDINGS.md", "CHANGES.md", "QUESTIONS.md")],
     "transcript":     lambda root, tid: [root / "tasks" / tid / ".smokin" / "transcript.log"],
     "plan":           lambda root, tid: [root / "PLAN.md"],
-    "roster":         lambda root, tid: [root / ROSTER_NAME],
+    # Both locations, Grillin's order — see read_roster. The consumer filters on
+    # is_file(), so listing the one that does not exist costs nothing.
+    "roster":         lambda root, tid: [root / "tasks" / ROSTER_NAME,
+                                         root / ROSTER_NAME],
     "herdr.state":    lambda root, tid: [root / ".herdr" / "state.json"],
 }
 
@@ -103,10 +106,22 @@ def read_roster(root: Path) -> tuple[dict, str | None]:
 
     The roster is the file that carries the reason, so it is also the file that
     decides what a judge costs. Nothing here invents a pairing; a persona with no
-    model or no effort in the table is reported as an error, not defaulted."""
-    f = root / ROSTER_NAME
-    if not f.is_file():
-        return {}, f"{ROSTER_NAME} not found beside the plan"
+    model or no effort in the table is reported as an error, not defaulted.
+
+    TWO LOCATIONS, in Grillin's order. Grillin owns plan layout and puts this
+    file at `tasks/_ROSTER.md` — both of its shipped examples do, and its
+    validator looks there first. This function looked only beside PLAN.md, so a
+    plan that passed Grillin's gate with a `_RULINGS.toml` would halt at tick 1
+    with "roster not found": the authoring validator permitting what the runtime
+    refuses, which is the whole reason the two are asserted against each other
+    now. Found by grillin/tests/test-config-contract.py on its first run, using
+    Grillin's own known-good fixture."""
+    for cand in (root / "tasks" / ROSTER_NAME, root / ROSTER_NAME):
+        if cand.is_file():
+            f = cand
+            break
+    else:
+        return {}, f"{ROSTER_NAME} not found at tasks/{ROSTER_NAME} or beside the plan"
     out, problems = {}, []
     for line in f.read_text(errors="replace").splitlines():
         if not line.lstrip().startswith("|"):
