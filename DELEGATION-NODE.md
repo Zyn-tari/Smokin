@@ -171,15 +171,24 @@ thing this design buys.
 ```
 smokin tick
   ├─ 0  acquire the tick lock            (one node at a time — two orchestrators is the collision nobody sees)
-  ├─ 0  read PLAN.md, _ROSTER.md, _RULINGS.toml, .herdr/state.json, receipts/     [tier 0]
+  ├─ 0  read PLAN.md, _ROSTER.md, _RULINGS.toml, _INVARIANTS.toml, .herdr/state.json, receipts/  [tier 0]
+  ├─ 1  re-read every plan-level invariant; a break HALTS before anything is dispatched  [tier 1]
   ├─ 0  reap: any dispatch past its deadline with no receipt is a FAILURE        [tier 0]
   ├─ 1  apply the plan's declared ceilings and retry policy                      [tier 1]
   ├─ 2  for each receipt needing a ruling: invoke one judge, write the ruling    [tier 2]
   ├─ 0  compute the frontier from rulings, not from receipts                     [tier 0]
   ├─ 0  dispatch up to the ceiling; write a dispatch record BEFORE launching     [tier 0]
+  ├─ 1  re-read the invariants again at the tick's end                           [tier 1]
   ├─ 0  publish .smokin/state.json by rename(2)                                  [tier 0]
   └─     exit
 ```
+
+**The invariant pass is tier 1 — a curator's rule applied mechanically (§3).** The curator declares
+what must not move and why; the node re-reads it and compares. No judgement is invoked, which is why
+it can afford to run twice a tick. It runs *before* dispatch so a plan that has already broken
+something does not get to add another worker to the damage, and again at the end so the break is
+attributed to the tick that caused it rather than discovered a tick later. `_INVARIANTS.toml` and
+what it does not solve are described in `DESIGN.md` §7b.
 
 Two lines carry most of the weight:
 

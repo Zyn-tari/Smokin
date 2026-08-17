@@ -10,6 +10,8 @@ smokin — an idempotent tick that dispatches a Grillin plan from disk.
     smokin present           re-render PROGRESS.md from STATUS.json
     smokin reap [--close]    force-reap overdue tasks (--close tidies panes)
     smokin rulings           resolve and print the judgement layer
+    smokin invariants        resolve and print the plan-level invariants
+             --recapture     take a new baseline, deliberately and on the record
     smokin resume            clear a halt, after a human has read it
     smokin reset --run <id>  retire a run's receipts and dispatch records
 
@@ -34,6 +36,13 @@ a judgement by someone who did not write the work. Each is a strictly stronger
 statement than the one before it, and the plan moves on the strongest one the
 curator asked for.
 
+AND WHAT MUST REMAIN TRUE. All three of those measure COMPLETION. None of them
+measures BLAST RADIUS — what a task broke on its way to passing its own gate.
+`_INVARIANTS.toml` declares readings that must not move: captured as a baseline
+before the first dispatch of a run, re-checked at every tick boundary and by
+`smokin verify`. A break is a halt with the command, the expected reading and
+the actual one. See smokin_invariants.py for the two incidents that produced it.
+
 Zero dependencies (python3 stdlib). Fail-closed.
 """
 import argparse
@@ -51,6 +60,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import smokin_rulings as R                                          # noqa: E402
+import smokin_invariants as I                                       # noqa: E402
 # NOT anchored to line start: Grillin's own register puts several of these on
 # one line — "**Blocked by:** — · **Blocks:** T2" and "**Dispatch:** inproc ·
 # **Runtime:** `demo`". An anchored pattern silently reads only the first field
@@ -162,6 +172,9 @@ class Plan:
         # every superseded one, so a re-judge leaves a trail.
         self.rules = R.load(root)
         self.standing = R.standing(self.priv)
+        # What must REMAIN TRUE, as opposed to what each task must ACHIEVE. Opt-in
+        # by the presence of `_INVARIANTS.toml`, same discipline as the rulings.
+        self.invariants = I.load(root)
 
     def size(self):
         n = len(self.tasks)
@@ -525,9 +538,14 @@ def halted(plan: Plan):
         return None
 
 
-def halt(plan: Plan, why: str, tier="3", task=None):
+def halt(plan: Plan, why: str, tier="3", task=None, broken=()):
+    # `broken` rides on the halt record because HALT.json outlives the process
+    # that wrote it. `smokin present` re-renders PROGRESS.md from files alone and
+    # has no tick rows to hand it; without this the halt banner survived a
+    # re-render and the three facts under it did not.
     rec = {"schema": "smokin.halt/1", "at": now(), "tier": tier,
            "task": task, "why": why, "run": plan.run_id(),
+           "broken": [b for b in broken],
            "clear_with": f"smokin resume {plan.root}"}
     plan.priv.mkdir(parents=True, exist_ok=True)
     (plan.priv / "HALT.json").write_text(json.dumps(rec, indent=1) + "\n")
@@ -538,7 +556,11 @@ def halt(plan: Plan, why: str, tier="3", task=None):
 def print_halt(rec):
     print(f"\nHALTED — tier {rec['tier']}"
           + (f" · task {rec['task']}" if rec.get("task") else ""))
-    print(f"  {rec['why']}")
+    # Every line, not just the first. An invariant halt is a multi-line block —
+    # command, expected reading, actual reading — and indenting only line one
+    # made the evidence look like unrelated output from something else.
+    for line in str(rec["why"]).splitlines() or [""]:
+        print(f"  {line}".rstrip())
     print("\nNothing further will be dispatched until a human reads this and runs")
     print(f"  {rec['clear_with']}")
 
@@ -601,6 +623,62 @@ def judge_pass(plan: Plan, rts: dict, dry=False):
     return made, None
 
 
+# ── tier 1 · what must remain true, and the baseline that says so ───────────
+# Tier 1 by DELEGATION-NODE.md §3: the rule is the curator's and the node only
+# applies it. No model, no tokens. The HALT it produces still needs a human —
+# every halt does — but the DECISION was made mechanically by a declared reading,
+# which is the cheapest tier that can catch this class of fault at all.
+
+def invariant_pass(plan: Plan, dry=False, recapture=False):
+    """Capture the baseline, or re-check it. Returns (rows, halt_reason).
+
+    The baseline is per-RUN. `smokin reset` drops run.json, so the next command
+    re-baselines against the world as it stands then — which is correct: a new
+    run is a new before."""
+    iset = plan.invariants
+    if not iset.active:
+        return [], None
+    if iset.error:
+        return [], (f"{I.CONFIG_NAME} does not load: {iset.error}. Nothing is dispatched in this "
+                    f"plan until it is fixed — falling back to 'no invariants' would let a typo "
+                    f"turn the blast-radius check off while the plan still looked guarded.")
+    if dry:
+        return [{"name": inv["name"], "ok": True, "actual": "(dry-run)"}
+                for inv in iset.invariants], None
+
+    run_id = plan.run_id()
+    base = None if recapture else I.read_baseline(plan.priv)
+    if base is None or base.get("run") != run_id:
+        rec, err = I.capture(plan.root, plan.priv, iset, run_id)
+        if err:
+            return [], err
+        ledger(plan, event="baseline", run=run_id, n=len(rec["readings"]),
+               names=sorted(rec["readings"]), recaptured=bool(recapture))
+        return [{"name": n, "ok": True, "actual": "(reference reading)"}
+                for n in sorted(rec["readings"])], None
+
+    rows, why = I.recheck(plan.root, plan.priv, iset, base)
+    for r in rows:
+        if not r["ok"]:
+            ledger(plan, event="invariant-broken", name=r["name"], run=run_id,
+                   expected=r["expected"], actual=r["actual"])
+    return rows, why
+
+
+def _broken(rows):
+    return [{"name": r["name"], "expected": r.get("expected"),
+             "actual": r.get("actual"), "because": r.get("because")}
+            for r in rows if not r.get("ok")]
+
+
+def print_invariants(rows):
+    for r in rows:
+        mark = "ok  " if r.get("ok") else "BROKE"
+        print(f"  invariant {mark} {r['name']}"
+              + (f"  {r['actual']}" if r.get("actual") in
+                 ("(reference reading)", "(dry-run)") else ""))
+
+
 # ── verify — the tick with the fleet removed ────────────────────────────────
 
 RE_READER = re.compile(r"^\*\*Reader:\*\*", re.M | re.I)
@@ -635,6 +713,19 @@ def verify(plan: Plan, only=None):
         print_halt(held)
         return 4
 
+    # BEFORE the verdicts, because a done-command is itself something that runs.
+    # At n=1 this is the whole before/after loop: the first `verify` of a run is
+    # the "before", every later one is the "after", and nobody has to remember to
+    # copy the paragraph into the next brief by hand.
+    inv_rows, inv_why = invariant_pass(plan)
+    print_invariants(inv_rows)
+    if inv_why:
+        rec = halt(plan, inv_why, tier="1", broken=_broken(inv_rows))
+        st = render_status(plan, [], [], [], [], (), rec, inv_rows)
+        write_progress(plan, st)
+        print_halt(rec)
+        return 4
+
     ids = [only] if only else sorted(plan.tasks)
     verdicted = []
     for tid in ids:
@@ -655,7 +746,7 @@ def verify(plan: Plan, only=None):
             print(f"  note     {tid} is declared adversarial. Nothing ran it here, so its "
                   f"independence is unverified.")
 
-    st = render_status(plan, [], verdicted, [], [], (), None)
+    st = render_status(plan, [], verdicted, [], [], (), None, inv_rows)
     write_progress(plan, st)
 
     if plan.rules.active and not plan.rules.error:
@@ -690,6 +781,20 @@ def tick(plan: Plan, dry=False, close_panes=False):
         print_halt(held)
         return 4
 
+    # FIRST, and before anything in this tick has touched the world. On tick 1 of
+    # a run this captures the baseline — "before the first dispatch" is literally
+    # true here, nothing below has run yet. On every later tick it is the AFTER
+    # half of the loop for the tick that came before, and it halts before this
+    # tick dispatches, so a plan does not add work on top of a broken machine.
+    inv_rows, inv_why = invariant_pass(plan, dry=dry)
+    print_invariants(inv_rows)
+    if inv_why:
+        rec = halt(plan, inv_why, tier="1", broken=_broken(inv_rows))
+        st = render_status(plan, [], [], [], [], (), rec, inv_rows)
+        write_progress(plan, st)
+        print_halt(rec)
+        return 4
+
     rts = runtimes(plan)
     reaped = reap(plan, close_panes)
     claimed = drain_spool(plan)
@@ -705,7 +810,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
     plan.__init__(plan.root)                     # re-read: rulings changed states
     if why:
         rec = halt(plan, why, task=None)
-        st = render_status(plan, reaped, list(verdicts), [], [], rulings, rec)
+        st = render_status(plan, reaped, list(verdicts), [], [], rulings, rec, inv_rows)
         write_progress(plan, st)
         for r in rulings:
             print(f"  ruling   {r.get('task')}  {r.get('class')}  {r.get('outcome')}")
@@ -756,7 +861,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
                   f"separate from every other task in this run.")
 
     plan.__init__(plan.root)
-    st = render_status(plan, reaped, list(verdicts), dispatched, queued, rulings, None)
+    st = render_status(plan, reaped, list(verdicts), dispatched, queued, rulings, None, inv_rows)
     write_progress(plan, st)
 
     for tid in reaped:
@@ -769,10 +874,30 @@ def tick(plan: Plan, dry=False, close_panes=False):
         print(f"  queued   {tid}  ({why})")
 
     inflight = st["counts"]["running"] + st["counts"]["claimed"] + st["counts"]["judging"]
-    if st["counts"]["verified"] == len(plan.tasks) and plan.tasks:
+    complete = st["counts"]["verified"] == len(plan.tasks) and plan.tasks
+    stuck = inflight == 0 and not st["frontier"]
+
+    # THE CLOSING READING. The check at the top of a tick is the "after" for the
+    # tick before it — but a plan that completes or gets stuck never gets a next
+    # tick, so its last dispatch would be the one nothing ever measured. The most
+    # expensive tick to skip is the last one: it is the one that ran the final
+    # migration, and "the deploy finished and the neighbouring sites went down"
+    # is precisely the shape the six briefs were guarding against.
+    if (complete or stuck) and not dry:
+        inv_rows2, inv_why2 = invariant_pass(plan)
+        print_invariants(inv_rows2)
+        if inv_why2:
+            rec = halt(plan, inv_why2, tier="1", broken=_broken(inv_rows2))
+            st = render_status(plan, reaped, list(verdicts), dispatched, queued,
+                               rulings, rec, inv_rows2)
+            write_progress(plan, st)
+            print_halt(rec)
+            return 4
+
+    if complete:
         print(f"\nplan complete — {len(plan.tasks)}/{len(plan.tasks)} verified")
         return 0
-    if inflight == 0 and not st["frontier"]:
+    if stuck:
         print("\nnothing in flight and nothing ready — the plan is STUCK")
         return 3
     print(f"\n{inflight} in flight · see PROGRESS.md")
@@ -795,7 +920,7 @@ WORD = {"verified": "verified", "judging": "awaiting a ruling",
 
 
 def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
-                  rulings=(), halt_rec=None):
+                  rulings=(), halt_rec=None, invariants=()):
     rows, counts = [], {k: 0 for k in GLYPH}
     for tid in sorted(plan.tasks):
         t, s = plan.tasks[tid], plan.state(tid)
@@ -825,6 +950,7 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
                          and s == "running" else None,
             "budget_s": d.get("budget_s"),
         })
+    base = I.read_baseline(plan.priv)
     st = {"schema": "smokin.status/2", "run": plan.run_id(), "at": now(),
           "plan": str(plan.root), "size": plan.size(),
           "pane_ceiling": PANE_CEILING[plan.size()],
@@ -834,6 +960,17 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
                         "error": plan.rules.error,
                         "uncovered": plan.rules.policy.get("uncovered"),
                         "classes": [r["class"] for r in plan.rules.rulings]},
+          "invariants": {"active": plan.invariants.active,
+                         "source": plan.invariants.source,
+                         "error": plan.invariants.error,
+                         "declared": [i["name"] for i in plan.invariants.invariants],
+                         "baseline_at": (base or {}).get("at"),
+                         "baseline_run": (base or {}).get("run"),
+                         "checked": [r["name"] for r in invariants],
+                         # A re-render with no tick behind it has no rows, so it
+                         # falls back to what the halt recorded when it fired.
+                         "broken": _broken(invariants)
+                                   or ((halt_rec or {}).get("broken") or [])},
           "halt": halt_rec,
           "this_tick": {"reaped": reaped, "verdicted": verdicted,
                         "dispatched": [d[0] for d in dispatched],
@@ -867,11 +1004,32 @@ def write_progress(plan: Plan, st: dict):
         h = st["halt"]
         L.append(f"## ⛔ HALTED — tier {h['tier']}")
         L.append("")
-        L.append(f"> {h['why']}")
+        # Every line gets its own `>`. An invariant halt is a multi-line block —
+        # command, expected, actual — and lazy blockquote continuation turns the
+        # indented lines into a code span and eats the reasons.
+        for line in str(h["why"]).splitlines() or [""]:
+            L.append(f"> {line}".rstrip())
         L.append("")
         L.append(f"Nothing further is dispatched until a human reads this and runs "
                  f"`{h['clear_with']}`. A halt that says why is a result; a node that "
                  f"guessed and continued would not be.")
+        L.append("")
+
+    broke = (st.get("invariants") or {}).get("broken") or []
+    if broke:
+        L.append("## ⛔ Something that had to stay true stopped being true")
+        L.append("")
+        for b in broke:
+            L.append(f"- **{b['name']}**")
+            L.append(f"    - expected  `{b['expected']}`")
+            L.append(f"    - actual    `{b['actual']}`")
+            L.append(f"    - declared because: {b['because']}")
+        L.append("")
+        L.append(f"*Measured against the baseline taken at "
+                 f"{(st.get('invariants') or {}).get('baseline_at')}, before the first dispatch "
+                 f"of this run. No task's own done-command looks at any of this — a task can "
+                 f"pass its gate and break this in the same minute, which is the entire reason "
+                 f"it is declared at plan level.*")
         L.append("")
 
     esc = [t for t in st["tasks"] if t["state"] in ("escalated", "uncovered")]
@@ -1053,6 +1211,13 @@ def reset(plan: Plan, run):
                                     "retires": rec.get("seq"), "outcome": rec.get("outcome"),
                                     "because": f"retired by `smokin reset` (was: {rec.get('because')})"})
         retired += 1
+    # The baseline IS deleted, and that is not inconsistent with keeping rulings.
+    # A ruling is a judgement someone made and must stay readable; a baseline is a
+    # measurement of one run's starting world, and after a reset that world is not
+    # the world the next run starts in. Keeping it would silently measure the new
+    # run against the old run's before. The capture is in the ledger either way.
+    if I.baseline_path(plan.priv).exists():
+        I.baseline_path(plan.priv).unlink(); n += 1
     (plan.priv / "HALT.json").unlink(missing_ok=True)
     (plan.priv / "run.json").unlink(missing_ok=True)
     print(f"reset: removed {n} artefact(s), retired {retired} ruling(s); "
@@ -1113,6 +1278,54 @@ def show_rulings(plan: Plan):
     return 0
 
 
+def show_invariants(plan: Plan, recapture=False):
+    """A silent config is indistinguishable from a working one unless something
+    can print it. Same reason `smokin rulings` exists."""
+    iset = plan.invariants
+    print(f"plan:   {plan.root}")
+    print(f"source: {iset.source or '(none — no plan-level invariants; only per-task gates)'}")
+    if iset.error:
+        print(f"\nERROR:  {iset.error}")
+        print("        Nothing is dispatched in this plan until it is fixed. This is")
+        print("        deliberate: falling back to 'no invariants' would let a typo turn the")
+        print("        blast-radius check off while the plan still looked guarded.")
+        return 1
+    if not iset.active:
+        return 0
+
+    print(f"declared: {len(iset.invariants)}   (each one runs at every tick boundary)")
+    for inv in iset.invariants:
+        expect = {"unchanged": "the reading must not move from the baseline",
+                  "equals": f"the reading must equal {inv['expect']!r}",
+                  "matches": f"the reading must match /{inv['expect']}/"}[inv["mode"]]
+        print(f"  {inv['name']}")
+        print(f"      run       {inv['run']}")
+        print(f"      expect    {expect}   ({inv['budget_s']}s)")
+        print(f"      because   {inv['because']}")
+
+    if recapture:
+        rows, why = invariant_pass(plan, recapture=True)
+        if why:
+            print(f"\nthe baseline could NOT be taken:\n  {why}")
+            return 1
+        print(f"\nbaseline recaptured for run {plan.run_id()} — {len(rows)} reading(s). "
+              f"Everything from here is compared to the world as it is right now.")
+        return 0
+
+    base = I.read_baseline(plan.priv)
+    if not base:
+        print("\nbaseline: NOT TAKEN. The first `smokin tick` or `smokin verify` of this run "
+              "takes it.\n          Take it BEFORE the change, not after — a baseline captured "
+              "late records\n          the damage as normal and every later reading agrees with it.")
+        return 0
+    print(f"\nbaseline: {len(base.get('readings') or {})} reading(s) taken {base.get('at')} "
+          f"for run {base.get('run')}")
+    for name, r in sorted((base.get("readings") or {}).items()):
+        print(f"  {name}")
+        print(f"      {I.fmt_reading(r)}")
+    return 0
+
+
 def resume(plan: Plan):
     h = halted(plan)
     if not h:
@@ -1130,12 +1343,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["doctor", "tick", "verify", "run", "status", "present",
-                                    "reap", "reset", "rulings", "resume"])
+                                    "reap", "reset", "rulings", "invariants", "resume"])
     ap.add_argument("plan", nargs="?", default=".")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--close", action="store_true", help="reap also closes the pane (SIGHUP)")
     ap.add_argument("--run", default=None)
     ap.add_argument("--task", default=None, help="verify: gate one task instead of all")
+    ap.add_argument("--recapture", action="store_true",
+                    help="invariants: take a new baseline. Deliberate, and it goes in the ledger")
     ap.add_argument("--max-ticks", type=int, default=200)
     ap.add_argument("--interval", type=float, default=3.0)
     a = ap.parse_args()
@@ -1152,6 +1367,8 @@ def main():
         return reset(plan, a.run)
     if a.cmd == "rulings":
         return show_rulings(plan)
+    if a.cmd == "invariants":
+        return show_invariants(plan, a.recapture)
     if a.cmd == "resume":
         return resume(plan)
     if a.cmd == "reap":

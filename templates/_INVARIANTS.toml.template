@@ -1,0 +1,127 @@
+# _INVARIANTS.toml — what must REMAIN TRUE while the plan runs.
+#
+# The curator writes this file. The orchestrator obeys it and may not edit it.
+#
+# WHAT IT IS FOR. Every other check in Smokin measures COMPLETION. A receipt is
+# the worker's claim it finished. A verdict is the task's own done-command re-run
+# by the tick. A ruling is a judge saying the claim was true. All three ask "is
+# this task done?" — and none of them asks "what did it break on the way?"
+#
+# They cannot ask it. A done-command is required to reference paths under its own
+# `tasks/<ID>/` and nothing outside it, precisely so a task cannot gate itself on
+# somebody else's work. That rule is right, and it leaves a hole exactly the size
+# of this file: a task can pass its gate perfectly and take the machine down.
+#
+# THE TWO INCIDENTS THIS CAME FROM.
+#
+#   A landing page was deployed to a production VPS across six hand-written
+#   briefs. All six carried the same paragraph, copied by hand: record the live
+#   sites BEFORE you change anything, run the identical loop AFTER, compare.
+#   That is exactly this file, written six times because nothing held it.
+#
+#   During that same deploy `certbot` silently added a `listen` directive that
+#   made a new vhost the default for all loopback HTTPS, so the NEIGHBOURING
+#   sites were served the wrong TLS certificate. A third-party tool edited config
+#   and created a fault outside every task's contract. The task succeeded. Its
+#   gate passed. The machine was broken anyway, and nothing in the plan looked.
+#
+# HOW IT WORKS. Every reading below is taken once, BEFORE the first dispatch of a
+# run — that is the baseline, in `.smokin/baseline.json`. It is re-taken at every
+# tick boundary and by `smokin verify`. A reading that moved is a HALT naming the
+# command, the expected reading and the actual one. Not a warning.
+#
+# OPT-IN BY FILE. Delete this file and there is no blast-radius check at all and
+# the tick behaves exactly as it did before. Keep it and it binds — and a
+# malformed one refuses to run rather than quietly guarding nothing.
+#
+# Check it with:  smokin invariants .
+
+
+# ── the policy ──────────────────────────────────────────────────────────────
+[policy]
+# Default seconds any one probe gets. An invariant that does not answer inside
+# its budget is a break, not a pass: an unanswered question is not an answer.
+budget_s = 60
+
+
+# ── the readings ────────────────────────────────────────────────────────────
+# One [[invariant]] per reading. `name`, `run` and `because` are required.
+
+[[invariant]]
+# `name` — what the reading IS, in words. It is a key in baseline.json and the
+# heading of a halt message, so write it for the person who finds the halt at
+# 3am and did not write the command.
+name = "the neighbouring sites still serve their own certificate"
+
+# `run` — the command that takes the reading. Runs with `cwd` at the plan root,
+# through bash, so pipelines are fine and are usually the point.
+#
+# Write it so that EXIT 0 MEANS "I TOOK THE READING" and the reading itself is on
+# stdout. A probe that cannot exit 0 when the baseline is taken is an unproven
+# instrument, and the capture refuses rather than record a broken probe as the
+# normal state of the world.
+run = "openssl s_client -connect 127.0.0.1:443 -servername neighbour.example </dev/null 2>/dev/null | openssl x509 -noout -subject"
+
+# `because` — why this reading matters. Required, and not boilerplate. The person
+# reading the halt is not the person who wrote the command; without this they
+# have a diff and no idea whether it is bad.
+because = "certbot added a listen directive that made a new vhost the default for all loopback HTTPS, and the neighbouring sites were served the wrong certificate for a day before anyone noticed."
+
+# Optional, and this one overrides [policy].
+budget_s = 30
+
+
+# ── the three ways to say what you expect ───────────────────────────────────
+# Declare AT MOST ONE of `equals` / `matches`. Declaring neither is the default
+# and is usually what you want.
+#
+#   (neither)  UNCHANGED — the reading must not move from the baseline. Use this
+#              when nobody knows what the right answer looks like, only that it
+#              must be the SAME answer afterwards. This is the mode the six
+#              briefs were hand-writing.
+#
+#   equals     the reading must equal this literal, exactly.
+#   matches    the reading must match this regex.
+#
+# A pinned `equals`/`matches` is checked AT BASELINE TOO. If it is already false
+# before the plan has run, the capture refuses — an invariant that was never true
+# cannot be broken by this plan, and halting on it later would blame the plan for
+# something it did not do. That control test is not optional here because it was
+# skipped once already: a real 404 was asserted as the cause of a bug and was not
+# the cause, and only blocking the file and watching the symptom NOT follow
+# settled it.
+
+# [[invariant]]
+# name    = "the neighbour site answers 200"
+# run     = "curl -sS -o /dev/null -w '%{http_code}' https://neighbour.example"
+# equals  = "200"
+# because = "it shares an nginx and a certificate store with what this plan edits"
+
+# [[invariant]]
+# name    = "no vhost has quietly become the default"
+# run     = "grep -rc default_server /etc/nginx/sites-enabled | sort"
+# because = "certbot writes this directive without saying so, and it changes which site every unmatched request lands on"
+
+# [[invariant]]
+# name    = "the schema is the one the app expects"
+# run     = "psql -tAc 'select md5(string_agg(column_name, chr(10) order by table_name, column_name)) from information_schema.columns where table_schema = current_schema()'"
+# because = "three tasks in this plan write migrations and only one of them is supposed to touch this schema"
+
+
+# ── Do NOT ──────────────────────────────────────────────────────────────────
+# - Do NOT let a probe print more than 4096 bytes. `nginx -T` is 40KB and its
+#   diff is unreadable in a halt message, which means nobody reads it, which
+#   means the halt taught nothing. Pipe it through `sha256sum` — the invariant
+#   still fires, on one line, and the loader refuses the dump either way.
+# - Do NOT call an agent (`claude`, `codex`, `codewhale`, `opencode`, `aider`).
+#   These re-run at every tick boundary; one that shells out to a model measures
+#   whether the tool is installed, forever. `curl` is fine and is the point —
+#   here the network IS the reading, which is not true of a done-command.
+# - Do NOT write a probe that changes what it measures. Nothing enforces this.
+# - Do NOT edit this file to make a halt go away. The baseline is a reading of a
+#   specific question, and changing the question invalidates it — the tick says
+#   so and stops rather than silently re-baselining. If the change is deliberate,
+#   `smokin invariants . --recapture` records that you meant it.
+# - Do NOT take the baseline late. It is captured at the first tick or the first
+#   `verify` OF A RUN. Start the run before the change, or the baseline records
+#   the damage as normal and every reading after it agrees.
