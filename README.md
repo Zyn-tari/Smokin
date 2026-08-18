@@ -16,6 +16,19 @@
 
 ---
 
+## Why it's called that
+
+Low and slow. You put it on, you walk away for hours, and the one thing you never do
+is trust the clock — you go back and put a probe in it, because "it's been six hours"
+and "it's done" are different sentences.
+
+That's this. [**Grillin'**](https://github.com/A-Pex97/grillin) is the high-heat part,
+where you attack the plan before anyone builds. **Smokin'** is the long unattended part:
+it runs your plan for hours without you watching, and when a worker says it finished, it
+goes and checks the temperature instead of believing it.
+
+Right — barbecue over. Here is the actual tool.
+
 ## Do you need this?
 
 | Your situation | Answer |
