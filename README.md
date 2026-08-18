@@ -500,6 +500,11 @@ workers are `sleep 1` — would be measuring the fixture and calling it a measur
 
 ---
 
+## Contributing
+
+One maintainer, issues in batches, and one rule: **a change that adds a mechanism must name
+the incident it came from.** See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Licence
 
 **The ideas are free. The tools are free for noncommercial use.**
@@ -510,5 +515,37 @@ workers are `sleep 1` — would be measuring the fixture and calling it a measur
 | **The tools** — [`bin/`](bin/), the hook, the tests | [PolyForm Noncommercial 1.0.0](LICENSE) | Free for personal, academic, research and non-profit use. **Commercial use needs a licence** — open an issue. |
 
 If it executes, it's PolyForm. If you read it, it's CC BY.
+
+### "Is my use commercial?" — the short answer
+
+**If you are one person learning, building your own thing, or trying this out: it's free, and
+it stays free. Stop reading here.**
+
+Most of what people worry about isn't restricted at all. **The method is CC BY** — a company
+can read it, follow the design documents, copy the templates and ship software with it, commercially, forever, for nothing. The only condition is saying where it
+came from. PolyForm covers the **scripts** and nothing else.
+
+| You are | The tools |
+|---|---|
+| An individual — hobby, side project, learning, your own product | **Free.** |
+| A student, academic, public research body, non-profit, government | **Free**, explicitly, whatever your funding — PolyForm says so in its own text |
+| A developer at a company, evaluating this to see if it's any good | **Free.** Trying it is not deploying it |
+| A company where this is part of how you ship | **Ask me.** Open an issue titled `licence` |
+| A consultancy using it on client work | **Ask me.** |
+| Anyone forking it, changing it, teaching it, writing about it | **Free**, noncommercially, and please do |
+
+**Where the line actually is:** not your job title, and not whether your laptop has a company
+sticker on it. It's whether an organisation is the beneficiary of the tooling. One engineer
+running `smokin verify` on their own branch is an individual. A team standardising on it in
+CI is an organisation.
+
+**If you're unsure, you're free until I answer.** Open the issue and keep working — I am one
+person and I would rather you used it than waited on me. I have never refused anyone, and the
+answer for small teams is going to be yes.
+
+**And if the licence is genuinely the blocker** for something you want to do, say so in the
+issue. That's useful information about whether this licence was the right call, and I would
+rather hear it than have you quietly walk away.
+
 
 <p align="center"><sub>built alongside <a href="https://github.com/A-Pex97/grillin">Grillin</a></sub></p>
