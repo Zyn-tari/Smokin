@@ -500,6 +500,21 @@ workers are `sleep 1` — would be measuring the fixture and calling it a measur
 
 ---
 
+## Updating
+
+```bash
+smokin status <plan>     # 0 complete, 3 stuck — either is safe. 1 means work is in flight
+git pull
+smokin --version
+```
+
+> **Do not update while a plan is running.** A running plan has state on disk that the
+> binary you are replacing wrote — receipts, verdicts, dispatch records, invariant
+> baselines. State surviving the *process* is the design; surviving a change of schema
+> mid-tick is not. Finish or `smokin reap` first.
+>
+> [`CHANGELOG.md`](CHANGELOG.md) says what changed.
+
 ## Contributing
 
 One maintainer, issues in batches, and one rule: **a change that adds a mechanism must name

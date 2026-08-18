@@ -57,6 +57,28 @@ import sys
 import time
 from pathlib import Path
 
+__version__ = "1.0.0"
+
+
+def _ver():
+    """Where this checkout actually is.
+
+    Smokin installs as a git clone, so unlike Grillin's single copied file it can
+    work out its own provenance — read it rather than stamp it, because a stamp
+    goes stale the moment somebody pulls. Falls back to saying it does not know,
+    which is more useful than a number that might be wrong.
+    """
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent.parent),
+                            "describe", "--tags", "--always", "--dirty"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return "unknown checkout"
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import smokin_rulings as R                                          # noqa: E402
@@ -1379,6 +1401,8 @@ def main():
                     help="invariants: take a new baseline. Deliberate, and it goes in the ledger")
     ap.add_argument("--max-ticks", type=int, default=200)
     ap.add_argument("--interval", type=float, default=3.0)
+    ap.add_argument("--version", action="version",
+                    version=f"smokin {__version__} ({_ver()})")
     a = ap.parse_args()
 
     root = Path(a.plan).resolve()
