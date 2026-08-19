@@ -186,6 +186,272 @@ violate the clause that produced it.
 
 ---
 
+### 2f · Pane reuse, and the hole it punches in containment
+
+*Added 2026-08-19, after the mechanism was built. The routing rule above decides whether a task
+gets a pane. It never asked whether it needed a **new** one, and `launch()` called
+`herdr pane split` unconditionally, so the answer was always yes.*
+
+**The incident.** An operator watched six agents sit idle, each holding exactly the context the
+next task needed, and opened a seventh pane. Context that cost real tokens to build was thrown
+away, and nothing in the plan directory recorded that it had been.
+
+**The cost, before the benefit.** Every other mechanism here assumes a task's beliefs die with its
+process. That is why `inproc` needs no containment machinery: a fresh subprocess per task gets it
+for free, and §3c's `session` field records it. A reused pane keeps the session alive across the
+task boundary, so **a wrong belief formed in task A survives into task B**, and task B's
+done-command cannot see it — the gate tests B's artefacts, and a contaminated premise that
+produces a passing artefact passes. Reuse is therefore **default-deny**, and every decision, taken
+or declined, goes in `ledger.jsonl` with the sentence that produced it.
+
+**Who may, by role.** The role is read from `**Reader:**`, the same field Grillin's validator
+reads, and it is not a preference:
+
+| Role | Reuse | Why it is not a preference |
+|---|---|---|
+| `**Reader:** adversary` | **FORBIDDEN** | Grillin's `check_adversary_context` fails the task unless it declares `**Context:** fresh — not a subagent of the orchestrator, not a continued session`. A reused agent **is** a continued session. Reusing here would make Smokin the thing that quietly breaks the plan's most load-bearing check *on a task still carrying the declaration that says it did not*. Grillin can only read the sentence; this is the half that can act on it |
+| `**Reader:** health` | **PREFERRED** | Grillin's `check_health_checker` says this role's contamination is "required, not disqualifying", and deliberately does not check it for a clean owner. It runs in rounds and gets better with the context it already holds |
+| anything else | **PERMITTED** | ordinary work, bounded by the containment cost above |
+
+**What identity means here.** `**Agent:**` is the persona — Grillin says so beside its own regex —
+and Smokin never read it: `grep RE_AGENT` returned nothing before this change. A persona is a
+label, not an addressable worker; Grillin has personas and no persons. A pane id is what turns the
+label into something you can send work to, so the pane history is keyed on `**Agent:**` and the
+mapping lives on the dispatch record, which already survived completion. **No new store.**
+
+Two things about that field, both measured rather than assumed. It repeats: `minimal-passing-plan`
+declares `**Agent:** `implementer`` on T2 *and* T3, which is what makes reuse possible at all. And
+it is usually **absent** — 9 of the 20 `TASK.md` shipped across both repositories declare it, and
+the largest fixture (`a-real-first-plan`, 8 tasks) declares it on none. So the parse defaults to
+absent and every mechanism downstream degrades to doing nothing, with one ledger line saying so:
+a reuse mechanism whose declines are silent is indistinguishable from one that was never built.
+
+> **This retracts §7 non-negotiable 6's "is unique across the plan".** That clause was never
+> implemented in Grillin, and Grillin's own shipped example contradicts it. Uniqueness would also
+> make this section impossible: if no two tasks may share a persona, there is never anything to
+> reuse. The rest of that row — the character class, and not colliding with herdr's kind labels —
+> is untouched.
+
+**The one question asked of the filesystem.** *Has the task previously dispatched into this pane
+reached a terminal state in the plan — is there a `RECEIPT.json`?* It is never asked whether the
+pane is alive, idle or busy. `grep 'os.kill|kill(0|/proc/|pid_alive|agent list|is_alive'` across
+all three executables returns nothing, that absence is deliberate (§3j), and CONTRIBUTING declines
+"Trusting a lifecycle state" by name — on this machine `herdr agent list` reported two bare login
+shells as idle agents.
+
+**The one question asked of the world is an attempt.** `herdr pane run` is sent to the remembered
+pane; a non-zero return falls back to a fresh split. CONFIRMED 2026-08-19:
+`herdr pane run w99:p99 "echo hi"` exits 1 with `{"error":{"code":"pane_not_found"}}`. An attempt's
+result is a fact. A lifecycle label is an opinion.
+
+**How it is measured: panes opened per run.** Not tokens. Token capture (§3f) reads what a
+dispatch spent and only works on the **headless** path, because the pane-side numbers live in
+vendor state directories that principle 14 and `bin/smokin-run`:61 both bar this design from
+reading. Reuse only happens in **panes**. The two halves do not overlap, and closing that gap by
+reaching into `~/.claude` would buy one number and sell principle 14. So the reading is a count of
+`.smokin/dispatch/*.json` records with `dispatch == "pane"`, split by whether they opened a pane
+or inherited one — no vendor parsing at all, and the direct measurement of the incident, since the
+incident was a pane being opened. It lands on `STATUS.json` as `panes` and in `PROGRESS.md` under
+"What this run cost in panes".
+
+**What is deliberately not built.** No reuse across runs (`smokin reset` unlinks the dispatch
+records, and that stays the way the history is cleared). No reuse for `inproc`, which is already
+fresh per process and has nothing to save. No pane pooling, no idle timeout, no reaping of an
+unused pane — all three need a lifecycle belief.
+
+**CONFIRMED end to end against the real `herdr` 0.8.0, 2026-08-19**, three runs of a four-task
+plan, not a stub:
+
+| Run | What happened |
+|---|---|
+| reuse | T1 opened `w4:pV`; T2, same persona, ran in it. `panes: {dispatches: 2, opened: 1, reused: 1}`, and T2's `session` is byte-identical to T1's — the containment collapse is on the record, not hidden |
+| the adversary | identical plan, T2 gains `**Reader:** adversary`. Two panes, `w4:pW` and `w4:pX`, ledger `why: reader-adversary-must-be-fresh` |
+| the fallback | the pane was closed by hand between T1 and T2, with T1's receipt already on disk — so every file-readable question still said *reuse it*. The attempt came back `herdr pane run returned 1`; T2 opened `w4:p0`. `opened: 2, reused: 0` |
+
+The third run also produced the one defect this feature shipped and fixed: the tick printed
+*"opened a fresh pane — reuse permitted, T1 finished in w4:pZ and left a receipt"*, which is the
+reason the decision was **taken** on a line announcing that it did not survive. True, and the
+wrong half of the story. The harness could not have found it; only running it could.
+
+### 2g · Agent memory — what survives the process, and the guard that lets it
+
+*Added 2026-08-19, immediately after §2f, and it is the same incident read a third time.*
+
+§2f keeps a **context** alive across a task boundary. It only works while the pane still exists,
+only inside one run, and never on the headless path — where a fresh subprocess per task is not an
+oversight, it is where `inproc`'s containment comes from. So the thing the operator was actually
+mourning, the observation the sixth agent had already paid for, still died with the process
+everywhere reuse could not reach.
+
+**What survives here is deliberately tiny.** Not the context: a transcript is not reconstructable
+and pretending otherwise produces a store nobody can audit. What survives is an **observation and
+the command that produced it** — one line each, in `.smokin/memory.jsonl`, append-only, the same
+open-append discipline as the ledger.
+
+**The guard is the feature, and it is the only reason this is allowed to exist.** Every entry
+carries the task it came from, the observation, and the command. `"be careful with async"` carries
+none of those and is **refused at write time** with a non-zero exit and nothing appended — not
+stored-and-flagged, because a flagged entry is still an entry and still gets recalled. The guard
+is **structural, not semantic**: nothing here grades prose, because nothing here can. What it
+requires is the one field that makes prose checkable, so a reader who doubts an entry can run the
+command and find out. Two entries make the point exactly:
+
+| Written | Stored |
+|---|---|
+| `be careful with async` | **refused** — no task, no observation, no command |
+| `be careful with async`, `--task T4`, `--observation "test_pool hung for 30s then timed out, 3 runs of 3"`, `--command "pytest -k pool -x"` | **accepted** — the same sentence, now something a reader can disagree with |
+
+**And that second row is the whole of it, which is weaker than "unfalsifiable advice is rejected"
+and must not be written as that.** The adversarial pass of 2026-08-19 put `--observation "async is
+tricky" --command "true"` behind the same sentence and it landed; so did a command field reading
+`"I just knew it from experience"`. What the guard refuses is a shape: an empty field, a runaway
+field, a claim carrying a line break (which would escape its own `## ` heading in the file a
+worker reads), an observation that is its own claim retyped, and — since that pass — a `--task`
+naming no task in this plan, which was invented provenance and stored happily. What the guard buys
+is that a doubting reader always has something to **run**. It does not and cannot refuse advice,
+and §2h says so where a reader will find it.
+**Two kinds, one guard.** A `fact` is something the tick observed itself; a `lesson` is a
+generalisation somebody drew from one. The distinction is about *who asserted it and how far it
+reaches*, never about how well it is evidenced — the guard does not weaken for a `fact`, because a
+fact with no command behind it is the same defect wearing a more confident word.
+
+**The tick writes exactly one thing automatically: a REFUTED gate.** A gate that passed teaches
+the next occupant nothing the receipt and the verdict do not already say. A gate that failed, and
+the exact command that showed it, is precisely what the next agent pays tokens to rediscover.
+Nothing harvests sentences out of `FINDINGS.md`: an agent's prose about its own work has no
+command attached and would be refused by the guard, and harvesting it anyway would be this
+mechanism deciding the guard applies to everyone else. **The obvious second automatic source —
+the rulings layer — is deliberately not wired**, for the same reason: a judgement has a `because`
+and no command, so it *is* refused by this guard, and that is the guard being right rather than
+inconvenient. A judgement's trail already lives in `rulings.jsonl`.
+
+**Recall is presented as SUSPECTED and never as instruction.** When a dispatched task declares an
+`**Agent:**` with memory from this run, Smokin writes `tasks/<ID>/MEMORY.md` — its own artefact in
+the task folder, same place and same principle-14 reasoning as the transcript — whose first
+paragraph says it is a document written against a snapshot, that the running system outranks it,
+and that a contradiction is worth a line in `FINDINGS.md` rather than a silent reconciliation.
+**Nothing auto-applies**, and every entry prints the command that produced it so the reader has
+somewhere to go other than the prose.
+
+**Retrieval is exact, bounded, and scoped to the run.** Exact string match on the persona name —
+no similarity, no embedding, no widening when nothing is found, because a recall that widens its
+own query hands a worker somebody else's context and calls it theirs. At most **5** entries, most
+recent first, because recall *is* spend and an unbounded one re-spends what it exists to save.
+Only entries from the **current run** are ever handed to a worker: the archive keeps everything
+and `smokin memory` prints all of it, but crossing a run boundary is a bigger claim than this has
+measured — the world moves between runs, which is the failure `_INVARIANTS.toml` already confesses
+under "a baseline taken late records the damage as normal".
+
+One place this deliberately disagrees with §2f: **a task is its own memory history.** `pane_history`
+excludes the current task, because a pane you are already inside is not a pane to reuse. Memory
+does the opposite, because a gate *your own task* failed on a previous attempt is the single most
+useful thing a retry can be told.
+
+**Every recall goes in the ledger, including every declined one** — persona, count, and the keys
+handed over. This mechanism can cause a failure no other mechanism in this tool can: a wrong
+belief handed to a worker *by the orchestrator itself*, which the worker's own gate cannot see.
+That has to be diagnosable from files after the fact.
+
+**Five personas is a report, not an action.** When the same normalised claim has been observed by
+five *different* personas, it has stopped being one agent's experience and is reported as a **skill
+candidate** — in `smokin memory`, on `STATUS.json`, and in `PROGRESS.md`. **No skill is written.**
+A skill is a document somebody has to keep true, and evidence that one should exist is not
+authority to write it.
+
+**`smokin reset` keeps the entries and drops the recalls.** Deleting an observation would make
+reset the cheapest way to erase an inconvenient measurement — the same trade that makes rulings
+*retired* rather than removed. Nothing leaks forward either: reset removes `run.json`, recall
+filters on the run id, so the next run starts empty and rebuilds its own.
+
+**`smokin verify` writes no memory**, and passes `remember=False` for the same reason it passes
+`write_status=False`. It is the door people adopt first *because* it is read-only, and a command
+that quietly starts accumulating a store on somebody's disk the first time they try it is not
+read-only in the sense that made them try it.
+
+**The honest limits**, here rather than in a footnote:
+
+- **Nothing verifies that the command is the command that produced the observation, or that it is
+  a command at all.** `--command true` passes the guard. Same limit §7b states about an invariant
+  probe being trusted to be read-only: the mechanism makes a claim checkable by a reader; it does
+  not make it true.
+- **A stored entry is rendered into a document Smokin signs, so its text is bounded rather than
+  trusted.** A claim may not contain a line break, a command is capped, and the fence around a
+  command is opened wider than the longest backtick run inside it. Before those three, a written
+  entry could put a `# VERIFIED AGAINST THE RUNNING SYSTEM` heading into `MEMORY.md` at top level
+  and countermand the SUSPECTED header over Smokin's own signature.
+- **Sameness is a normalised string**, so two phrasings of one lesson are two lessons and the
+  skill-candidate count is a **floor**, never a total. Judging that two sentences mean the same
+  thing is a semantic call, and a counter whose answer depends on a model call is not a
+  measurement.
+- **Only a refuted gate is captured automatically.** An invariant break is the obvious second
+  candidate and is not built: a break is a **halt**, and a halt is read by a human, not recalled
+  by an agent.
+
+**What it costs when it is off, measured rather than asserted.** A plan whose gates all pass
+writes no store, no `MEMORY.md` and no `PROGRESS.md` section; a plan that declares no `**Agent:**`
+— the common case, 9 of 20 shipped `TASK.md` — writes nothing and says why in the ledger. In both
+cases **the dispatch line is byte-identical** to the one this tool sent before the feature
+existed, which is a comparison of the bytes a worker received and not a claim about intent.
+
+---
+
+### 2h · The limits of this layer, and the index that was cut
+
+*Added 2026-08-19 after the adversarial pass. Three mechanisms landed together — token capture
+(§3f), pane reuse (§2f), agent memory (§2g) — and they share one property that belongs in one
+place instead of three: **each of them buys something by giving something up, and the thing given
+up is not visible in the thing bought.***
+
+**One agent's memory is one agent's view.** `for_agent` returns the entries whose `agent` field
+equals this task's persona, and that is the entire retrieval model. It is not a knowledge base, it
+is not consensus, and nothing reconciles two personas that observed opposite things — both entries
+sit in the store and each persona sees only its own. The store's confidence is uniform whether one
+agent measured something once or five agents measured it five times; the only place plurality is
+even counted is the skill-candidate report, and that report is a report.
+
+**Reuse trades a containment guarantee for saved context, and the trade is not reversible.**
+`inproc` gives independence for free — a fresh subprocess per task, no shared state, by
+construction. Every reused pane spends that. A wrong belief formed in task A survives into task B,
+task B's own gate cannot see it (the gate tests B's artefacts, and a contaminated premise that
+produces a passing artefact passes), and the ledger line saying so is the only trace. The role
+table is the one place the trade is refused outright: the adversary never reuses, and — since the
+adversarial pass — its context never flows *outward* either, because an ordinary task inheriting
+the adversary's pane spends the same independence the plan bought a whole task to get.
+
+**Token capture measures what a runtime chooses to report, and nothing else.** Not what was spent:
+what the vendor printed on stdout. A runtime that reports no cost has no cost key, a pane reports
+nothing at all and says `available: false`, and a `select: sum` runtime whose transcript lost a
+line to the tee race reports a number that is a **floor** and now says `dropped_records` beside it.
+None of these is a measurement of the model's actual spend, and no reading here should ever be
+subtracted from a bill.
+
+**The lexical recall index was CUT, and this is the reason rather than an omission.** The design
+sketched a second retrieval path: score stored claims against the current task's text and hand
+over the ones that score well. It was not built. The triage step that would have authorised it
+refused, because the research that was supposed to establish **whether lexical similarity can
+separate a right match from a wrong one** never arrived — and without that, the scorer's threshold
+is a number somebody picked. The failure mode of a wrong pick is specific and severe: the
+orchestrator hands a worker a confident premise about a *different* piece of work, the worker's own
+gate cannot see it, and the entry reads exactly like the ones that are right. So it was **not
+built rather than built on a guess**, and the consequence is stated plainly: recall here cannot
+find a relevant entry that a different persona wrote, and it never will until somebody measures
+the thing that was never measured. What ships instead — exact match on the persona name — makes
+false association by wrong-match structurally impossible, which is a smaller claim and a true one.
+
+**What the adversarial pass changed, so a reader can tell the layer's limits from its defects.**
+The pass was real and it found real things: a persona name from `**Agent:**` reached the shell that
+`herdr pane run` executes; a stored entry could rewrite the document Smokin hands a worker; recall
+ignored the role gate that panes obey; Smokin and Grillin disagreed about what the word
+`adversary` means in four inputs Grillin accepts; one deeply nested transcript line ended the whole
+tick; and `verify` held both halves of a broken-independence proof in files it already read and
+never joined them. All are fixed and each fix has a check that fails without it. What is **not**
+fixed, and is a limit rather than a defect: a persona is still a name a task claims, so any task
+declaring `**Agent:** recon` inherits `recon`'s pane and `recon`'s entries. Binding a persona to a
+task or an owned path would break Grillin's own shipped example, where `implementer` appears on
+two tasks — and reuse needs a repeated persona to have anything to reuse.
+
+---
+
 ## 3 · The completion ping
 
 The requester's fourth item: *instead of the orchestrator talking to each pane, a background ping
@@ -312,16 +578,54 @@ exit 0 from an agent that gave up is the most common lie in this category, and c
 into one enum is how you get it. A judge required this split and it is taken whole.
 
 **`result` is the end result** — the thing the requester asked the ping to carry. Every runtime
-can fill it from something specific: Claude's `Stop.last_assistant_message` or
-`-p --output-format json .result`; Codex's `notify` payload `last-assistant-message` or the
-`-o` file; OpenCode's `GET /session/{id}/message`; Codewhale's `exec --json .output`. All
-SUSPECTED except Codewhale's, which is **CONFIRMED** by dossier probe returning
-`{"mode":"one-shot","success":true,"output":"OK"}`.
+can fill it from something specific, and three of them now do it from the transcript rather than
+from a vendor state directory: Claude's `-p --output-format json` envelope at `.result`
+(**CONFIRMED**, `result:"OK"`); Codewhale's `exec --auto --output-format stream-json` `content`
+events, which must be **joined** because they are token chunks — a run counting to twenty emitted
+`ele` then `ven`, so taking the last would put the word "twenty" in the receipt (**CONFIRMED**);
+OpenCode's `run --format json` `text` part, which by contrast arrives **whole** and is taken as
+the last (**CONFIRMED**). Codex's `notify` payload `last-assistant-message` remains SUSPECTED and
+Codex remains absent from this machine.
+
+> **Retracted:** the draft named Codewhale's `exec --json .output`, on the strength of a dossier
+> probe returning `{"mode":"one-shot","success":true,"output":"OK"}`. That summary is real and it
+> carries **no token field at all** — confirmed twice, once with real tool use — so the row moved
+> to `stream-json` and `result` moved with it. The old citation was CONFIRMED and is now simply
+> the wrong flag to be reading.
 
 **The result *text* rides in the receipt; the result *artefacts* stay in the task folder as
 paths and hashes.** Codex's own `notify` mechanism is documented to blow past OS argv limits
 precisely because it inlines prompt history; a receipt that inlines a diff will find the same
 wall in a different place.
+
+**`usage` is an OPTIONAL key and the schema stays `smokin.receipt/1`.** It carries what the
+runtime itself reported about the dispatch — `input_tokens`, `output_tokens`,
+`cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and `cost_usd` *only from a
+runtime that reports one*. Bumping to `/2` for a purely additive field would cost every reader
+in this repo and in Grillin a version branch to gain nothing: a reader that does not know about
+`usage` ignores it, which is what additive means. The three states are distinct on purpose and
+a reader must not collapse them:
+
+| receipt says | means |
+|---|---|
+| no `usage` key | the runtime reported nothing this path could see |
+| `{"available":false,"reason":"pane-not-instrumented"}` | this **path** cannot see it — v1 measures headless only |
+| `{"input_tokens":…}` | the runtime's own numbers, unconverted |
+
+**A number the runtime did not report is ABSENT, never `null` and never `0`.** Codewhale reports
+tokens and no cost anywhere; a `cost_usd: 0` there would be a lie that survives every later
+average, and a price table this repository invents to fill the column would be the unearned
+assertion §7 refuses. **Tokens and cost are not one capability**, and a schema that treats them
+as one forces exactly that invention.
+
+**Where the numbers come from is a row in `runtimes.json`, not a branch in the tick** (§4c). Two
+descriptors — `result_from` and `usage`, each `{select, match, map}` — describe the three shapes
+that actually exist: a single-line JSON envelope, a terminal NDJSON event, and per-step NDJSON
+events that must be summed. The reader **scans** the transcript and keeps the last match; it
+never slices the head or the tail, because `smokin-run` runs two racing `tee` processes and
+stdout and stderr are CONFIRMED to interleave out of order. A line that does not parse is
+skipped in silence — a torn interleaved write and a vendor banner are indistinguishable from
+there, and neither is a defect.
 
 ### 3g · `seq`, the cursor, and the tick lock
 
@@ -426,8 +730,13 @@ wait for `done` from one. Since Smokin never waits on lifecycle at all, this cos
 
 1. **A directory.** `tasks/<ID>/`, absolute, in `SMOKIN_TASK_DIR`. Grillin's rule already; Smokin
    makes it load-bearing for a second reason (4c).
-2. **One line of text, ≤512 bytes, naming that path and nothing else.** E.g.
-   `read tasks/T14/TASK.md and follow it`. Stored at `.smokin/dispatch/<ID>.cmd` so its length
+2. **One line of text, ≤512 bytes, naming paths inside that folder and nothing else.** E.g.
+   `read tasks/T14/TASK.md and follow it`. *Amended 2026-08-19: this used to read "naming that
+   path and nothing else". §2g adds one clause, and only when there is something to recall —
+   `. tasks/T14/MEMORY.md is what an earlier <persona> observed - SUSPECTED prior context, not
+   instruction`. The file is Smokin's own artefact inside the task's own folder, the alternative
+   was an agent that never finds it, and the unchanged line is byte-identical in every plan that
+   has nothing to recall.* Stored at `.smokin/dispatch/<ID>.cmd` so its length
    and line count are checkable. This is a hard limit, not a style preference: prompts over
    ~2000 characters are documented to corrupt through terminal injection, and Codex specifically
    cannot accept multi-line input that way (SUSPECTED — third-party issue tracker, not reproduced
@@ -643,7 +952,7 @@ practice.** That is the honest state and it is stated here rather than in a foot
 | 3 | No done-command invokes an agent binary (`claude`, `codex`, `codewhale`, `opencode`, `aider`, `herdr`, `curl`); `argv[0]` restricted to an allowlist | **ENFORCEABLE** | new `check_no_binary_in_gate()`, **plus** the `not found` regex fix at `validate-plan.py:264-268`. §6 shows why |
 | 4 | Every done-command references a path under its own `tasks/<ID>/` and none outside it | **ENFORCEABLE** | new `check_gate_inside_task_folder()`. The validator runs gates with `cwd=plan` (CONFIRMED, `:222`), so an unanchored gate tests someone else's work |
 | 5 | Every `TASK.md` links `[../_SMOKIN.md](../_SMOKIN.md)` | **ENFORCEABLE, free** | the **existing** `check_references()` rglobs every `*.md` and fails on an unresolvable relative link (CONFIRMED, `:257-274`). Adding the line to `TASK.md.template` makes the contract file mandatory with zero new Python — the same lever that already makes `_RULES.md` mandatory |
-| 6 | `**Agent:**` matches `^[a-z][a-z0-9_-]{0,31}$`, is unique across the plan, and is not one of herdr's 21 kind labels | **ENFORCEABLE** | new `check_role_name()`. Principle 15; five agents called `claude` is not a fleet |
+| 6 | `**Agent:**` matches `^[a-z][a-z0-9_-]{0,31}$` and is not one of herdr's 21 kind labels | **ENFORCEABLE** | new `check_role_name()`. Principle 15; five agents called `claude` is not a fleet. **"is unique across the plan" is RETRACTED** — never implemented, contradicted by Grillin's own `minimal-passing-plan` (T2 and T3 both declare `implementer`), and incompatible with §2f, which needs a repeated persona to have anything to reuse |
 | 7 | Every pane task's `## Do NOT` forbids opening panes or spawning sub-agents | **ENFORCEABLE** | new `check_no_nested_dispatch()`. One orchestrator level: the script opens panes, panes do not |
 | 8 | Concurrent pane tasks' `## What you own` path sets are disjoint | **ENFORCEABLE** | new `check_paths_disjoint()` over the graph the validator already parses. Same-file collision is the most-reported failure in the prior art |
 | 9 | Pane count does not exceed the SCALING size row's `paneCeiling` | **ENFORCEABLE, provisional** | new `check_pane_ceiling()`. The number is an opinion (§2d) and ships flagged provisional |
@@ -689,16 +998,25 @@ Smokin proposes **one** addition, not two, and not the one the draft chose:
 and a method that tells authors not to duplicate should not duplicate. The stateless tick is
 cited under principle 14 as its mechanism.
 
-### 7b · Three new anti-pattern rows
+### 7b · Five new anti-pattern rows
 
 In the exact register — bare imperative left, lowercase consequence fragment right, no terminal
-periods. Count moves 25 → 28.
+periods. Count moves 25 → 30.
 
 | Don't | Because |
 |---|---|
 | Open a pane to get parallelism | parallelism is free in-process; a pane is bought with a screen and paid for in review capacity |
 | Wait on an agent's lifecycle instead of its receipt | a runtime herdr cannot classify has no lifecycle to wait on, and `unknown` is not a result |
 | Call an agent binary from a done-command | the gate then tests whether the tool is installed, not whether the work is finished |
+| Hand the adversarial pass an agent that has already run something | a reused agent is a continued session, and the task still carries the declaration saying it is not |
+| Write down a lesson without the command that produced it | advice nobody can re-run reads exactly like a fact, and the next agent cannot tell them apart |
+
+*The last two rows are the only anti-patterns here a tool can ENFORCE rather than describe.
+The fourth is §2f: Grillin's `check_adversary_context` can only read the sentence a task
+declares, and `smokin tick` is the half that decides who actually gets the pane. The fifth is
+§2g's write guard, which refuses the entry outright — and it is worth noting that the enforcement
+is structural, not semantic. Nothing grades the prose; what is required is the field that lets a
+reader check it.*
 
 ---
 
@@ -924,6 +1242,36 @@ reaper-only. This is a ten-minute experiment and it is load-bearing.
 
 **Q5 — Can a Smokin plan run twice concurrently on one machine?** Vendor global config, a fixed
 port and one credential file say probably not. Undesigned.
+
+**Q6 — What does a PANE cost?** Nothing here can say, and the two halves of the obvious answer
+do not overlap. Usage capture works only on the **headless** path, because the only source this
+design will read is the transcript `smokin-run` tees into the task folder; a pane's output goes
+to a screen. The numbers do exist on disk — `~/.claude/projects/*.jsonl`,
+`~/.local/share/opencode/opencode.db` — and reading them is barred by the same ruling
+`smokin-run`:61 already carries: *a pointer to `~/.claude` is not reconstructable from the
+repository* (principle 14). So Smokin can measure tokens exactly where it cannot yet reuse
+context, and will be able to reuse context exactly where it cannot measure tokens. **The trade
+that closes the loop — one number for principle 14 — is refused, and the receipt says
+`available:false` out loud instead of looking like a runtime that reported zero.** The reading
+that *is* available for the reuse half needs no vendor parsing at all: panes opened per run is a
+count of `.smokin/dispatch/*.json` records with `dispatch:"pane"`, and the incident being
+measured was a pane being opened.
+
+**Q7 — Should memory cross a run boundary?** §2g stores an observation with the command that
+produced it, and recall hands a worker only entries from the **current** run. Across runs the
+world has moved: `_INVARIANTS.toml` already confesses the same shape under *"a baseline taken
+late records the damage as normal"*, and an observation about a world that no longer exists reads
+identically to one about the world in front of you. The archive keeps everything and
+`smokin memory` prints all of it, so a human can carry a lesson forward deliberately by writing
+it into the new run — which is the ceremony, and it is on purpose. **What would settle it:** a
+measurement nobody has taken, of how often a cross-run recall would have been *right*. Until
+then the filter stays and the honest statement is that this is unmeasured, not that it is wrong.
+
+**Q8 — Two phrasings of one lesson are two lessons.** Sameness is a normalised string, so the
+skill-candidate threshold counts phrasings rather than meanings and is a **floor**. The fix
+everyone reaches for — ask a model whether two sentences agree — puts a judgement call inside a
+counter, and a counter whose answer depends on a model call is not a measurement. Stated rather
+than solved.
 
 ### Deliberately not solved
 

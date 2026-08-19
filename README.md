@@ -204,8 +204,10 @@ verdict  T3  REFUTED
 | `smokin reap <plan> [--close]` | force-reap overdue tasks; `--close` also tidies the pane |
 | `smokin rulings <plan>` | resolve and print the judgement layer, and the ledger it has written |
 | `smokin invariants <plan>` | print the plan-level invariants and their baseline; `--recapture` re-takes it, and says so in the ledger |
+| `smokin memory <plan>` | print what each persona observed, and any skill candidate. Read-only |
+| `smokin remember <plan> --agent … --task … --claim … --observation … --command …` | write one entry down. **Refused without the command that produced it**, and refused for a `--task` that names no task in this plan. It is a shape check, not a judgement about the prose — see DESIGN §2h |
 | `smokin resume <plan>` | clear a halt, after a human has read it |
-| `smokin reset <plan>` | retire the run — receipts, verdicts, artefacts, statuses, rulings |
+| `smokin reset <plan>` | retire the run — receipts, verdicts, artefacts, statuses, rulings. Memory entries are kept; the recalls rendered from them are not |
 
 **Exit codes:** `0` complete · `1` work in flight, tick again · `2` not a plan directory ·
 `3` stuck — nothing running and nothing ready · `4` **halted — a human has to read something**.
@@ -268,7 +270,9 @@ first leaves a window where a crash re-dispatches dependants on top of still-run
 `VERDICT.json`.
 
 **4 · dispatch.** Every ready task launches — in-process by default, in a pane only under a
-declared clause.
+declared clause. A pane task may **reuse** the pane a task with the same `**Agent:**` persona
+already finished in, decided from files and default-deny. The adversarial pass never does: a
+reused agent is a continued session, and the plan's own gate requires it to be fresh.
 
 **5 · render.** `STATUS.json` from files, then `PROGRESS.md` from `STATUS.json` only.
 
@@ -416,7 +420,7 @@ you cannot reconstruct it from the plan directory, it does not exist.
 | [`DESIGN.md`](DESIGN.md) | why it is shaped like this, and what three adversarial passes broke |
 | [`examples/demo-plan`](examples/demo-plan) | a runnable three-task plan; T3's gate fails on purpose |
 | [`DELEGATION-NODE.md`](DELEGATION-NODE.md) | the judgement layer: four tiers, and what the node may never decide |
-| [`tests/run-tests.sh`](tests/run-tests.sh) | the calibration harness — crash recovery, the emitter mutex, `verify`, rulings and invariants. `21 passed, 0 failed` |
+| [`tests/run-tests.sh`](tests/run-tests.sh) | the calibration harness — crash recovery, the emitter mutex, `verify`, rulings, invariants, token capture, pane reuse and agent memory. `34 passed, 0 failed` |
 
 **Requires** `python3` (stdlib only) and `bash`. `herdr` is **optional** — without it panes are
 unavailable and everything else works. No packages, no daemon, no database.

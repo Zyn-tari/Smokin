@@ -51,6 +51,13 @@ would give that up.
 
 **Dependencies.** python3, stdlib, bash. `herdr` is optional and must stay optional.
 
+**A lesson with no command behind it.** `.smokin/memory.jsonl` stores an observation and the
+command that produced it, and refuses anything else at write time — "be careful with async" reads
+exactly like a fact to the next agent, and there is no way for that agent to tell them apart. A
+change that relaxes the guard, or that harvests prose out of `FINDINGS.md` into the store, is the
+wrong change. The guard is structural on purpose: nothing here grades prose, because nothing here
+can.
+
 **Trusting a lifecycle state.** An agent reported `idle` is not an agent that finished. On a
 real machine `herdr agent list` reported two bare login shells as idle agents. Watch the
 filesystem, never the screen.
@@ -58,8 +65,9 @@ filesystem, never the screen.
 ## If you touch the tick
 
 ```bash
-bash tests/run-tests.sh          # 31 checks; crash recovery, the emitter mutex, verify,
-                                 # the delegation node, plan invariants, the hook
+bash tests/run-tests.sh          # 34 checks; crash recovery, the emitter mutex, verify,
+                                 # the delegation node, plan invariants, the hook,
+                                 # token capture, pane reuse, agent memory
 ```
 
 Every loud check needs a **silent control** beside it. A test proving your mechanism fires
