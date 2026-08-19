@@ -8,8 +8,11 @@ smokin — an idempotent tick that dispatches a Grillin plan from disk.
     smokin run               tick until the plan is finished or stuck
     smokin status            print the frontier
     smokin present           re-render PROGRESS.md from STATUS.json
-    smokin reap [--close]    force-reap overdue tasks (--close tidies panes)
+    smokin reap [--close]    force-reap overdue tasks (--close closes the tabs of
+                             the tasks it reaped — never of ones that finished)
     smokin rulings           resolve and print the judgement layer
+    smokin memory            what each persona already observed. Read-only
+    smokin remember          store one observation. Refused without its command
     smokin invariants        resolve and print the plan-level invariants
              --recapture     take a new baseline, deliberately and on the record
     smokin resume            clear a halt, after a human has read it
@@ -51,6 +54,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -83,6 +87,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import smokin_rulings as R                                          # noqa: E402
 import smokin_invariants as I                                       # noqa: E402
+import smokin_usage as U                                            # noqa: E402
+import smokin_memory as M                                           # noqa: E402
 # NOT anchored to line start: Grillin's own register puts several of these on
 # one line — "**Blocked by:** — · **Blocks:** T2" and "**Dispatch:** inproc ·
 # **Runtime:** `demo`". An anchored pattern silently reads only the first field
@@ -98,6 +104,41 @@ RE_BUDGET = RE_FIELD("Budget")
 RE_INTERRUPT = RE_FIELD("Interrupt")
 RE_WATCH = RE_FIELD("Watch")
 RE_TYPE = RE_FIELD("Type")
+# WHO the plan says is doing the work, as distinct from who is accountable for
+# it. Grillin's validator says it in a comment beside its own regex: "`**Owner:**`
+# is who is accountable. `**Agent:**` is the PERSONA." Smokin read `Owner` and
+# never read `Agent` — CONFIRMED, `grep RE_AGENT bin/smokin` returned nothing
+# before this change — and the two are not interchangeable: real `Owner` values
+# in the shipped examples are `worker-a`, `reviewer`, free prose, while `Agent`
+# values are `recon`, `implementer`, `adversary`, `health`, one lowercase token
+# that resolves against `_ROSTER.md`.
+RE_AGENT = RE_FIELD("Agent")
+# adversary | health | absent. The role a task's reader plays, and the field that
+# decides whether its context may be reused.
+#
+# GRILLIN'S REGEX, CHARACTER FOR CHARACTER, and that is the point rather than a
+# convenience. This used to be a generic `RE_FIELD("Reader")` read with
+# `.split()[0]`, which agreed with the gate on clean input and diverged on four
+# inputs the gate accepts: `**Reader:** adversary.`, `adversary,` and
+# `adversary-fresh` all classify as ADVERSARY to Grillin — which then demands
+# the "not a continued session" declaration — while Smokin read `'adversary.'`,
+# failed its `== "adversary"` test and handed the task a REUSED pane. Worse, the
+# unanchored field takes the FIRST match anywhere in the file, so an earlier
+# `**Reader:**` sharing a field line shadowed the real declaration for Smokin
+# alone. The unanchored-field rationale above is about Blocked-by/Blocks and
+# Dispatch/Runtime sharing a line; Reader shares a line in no fixture in either
+# repository, and if it did, Grillin's gate would not see it either. Two
+# programs enforcing two halves of one rule must not agree by coincidence.
+RE_READER = re.compile(r"^\*\*Reader:\*\*\s*([a-z]+)", re.M | re.I)
+# WHAT A PERSONA NAME MAY CONTAIN. Not a style rule — this string is a registry
+# key, it names a pane a later task is sent into, and it reached a shell. Every
+# `**Agent:**` in either repository's shipped plans is one lowercase token
+# (`recon`, `implementer`, `adversary`, `health`); this is deliberately wider
+# than that so a plan with `worker-a` or `db owner` still works, and it excludes
+# every shell metacharacter. A value outside it is treated as NO PERSONA — the
+# same degradation the common case already takes, since 11 of 20 shipped
+# TASK.md declare no `**Agent:**` at all.
+RE_AGENT_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 RE_TASK_ID = re.compile(r"\b([A-Z]\d{1,3}[a-z]?)\b")
 RE_FENCE = re.compile(r"```[a-z]*\n(.*?)```", re.S)
 
@@ -148,6 +189,26 @@ class Task:
         self.blocked_by = set(RE_TASK_ID.findall(field(RE_BLOCKED, t)))
         self.dispatch = (field(RE_DISPATCH, t, "inproc") or "inproc").lower()
         self.runtime = field(RE_RUNTIME, t, "claude").strip("`")
+        # THE PERSONA, AND IT DEFAULTS TO ABSENT ON PURPOSE. Re-measured across
+        # every shipped TASK.md in both repositories: 9 of 20 declare it, and the
+        # LARGEST fixture — `grillin/examples/a-real-first-plan`, 8 tasks —
+        # declares it on none of them. So the common case is a plan that says
+        # nothing here, and every mechanism downstream must degrade to doing
+        # nothing rather than inventing an identity. Backticked wherever it
+        # appears, exactly like **Runtime:**, hence the same strip.
+        # VALIDATED, because this is the one plan-supplied string that becomes
+        # a registry key AND reached a shell. The recall clause interpolates it
+        # into the command the pane path hands to `herdr pane run`, unquoted:
+        # `**Agent:** `impl; touch /tmp/PWNED #`` executed, CONFIRMED, and the
+        # comment beside that clause asserted the opposite. Two independent
+        # repairs landed — the line is shell-quoted at substitution, and a
+        # persona that is not a persona name is not a persona. `agent_declared`
+        # keeps the raw value so the refusal can be said out loud rather than
+        # looking like a plan that declared nothing.
+        self.agent_declared = field(RE_AGENT, t).strip("`").strip()
+        self.agent = (self.agent_declared
+                      if RE_AGENT_OK.match(self.agent_declared) else "")
+        self.reader = field(RE_READER, t).strip().lower()
         self.type = field(RE_TYPE, t).upper()
         self.interrupt = field(RE_INTERRUPT, t, "no").lower().startswith("y")
         self.watch = field(RE_WATCH, t, "no").lower().startswith("y")
@@ -385,17 +446,237 @@ def runtimes(plan: Plan):
     `_comment` key whose value is a LIST, and `doctor` walked every key and
     crashed on it. It never showed up in the tests because the demo plan ships
     its own runtimes.json, so the fallback path — the one every real plan takes
-    — was the one nothing exercised. Found by running doctor on a server."""
-    for p in (plan.priv / "runtimes.json", HERE.parent / "templates" / "runtimes.json"):
-        if p.is_file():
-            try:
-                raw = json.loads(p.read_text())
-            except ValueError as e:
-                raise SystemExit(f"smokin: {p} is not valid JSON — {e}")
-            if not isinstance(raw, dict):
-                raise SystemExit(f"smokin: {p} must be an object of runtime rows")
-            return {k: v for k, v in raw.items() if isinstance(v, dict)}
-    return {}
+    — was the one nothing exercised. Found by running doctor on a server.
+
+    The body moved into smokin_usage the day the EMITTER needed the same table
+    to know what shape a transcript is in. Two copies of a loader is two
+    behaviours the first time someone adds a key to one of them; `strict` is
+    the only difference the callers are allowed, and it is the difference
+    between "refuse to launch" and "never refuse to write a receipt"."""
+    return U.load_runtimes(
+        [plan.priv / "runtimes.json", HERE.parent / "templates" / "runtimes.json"],
+        strict=True)
+
+
+# ── pane reuse ──────────────────────────────────────────────────────────────
+# THE INCIDENT. An operator watched six agents sit idle, each holding exactly
+# the context the next task needed, and opened a seventh pane. Context that cost
+# real tokens to build was thrown away, and `launch()` guaranteed it would be:
+# the pane branch called `herdr_pane()` unconditionally, so every pane task got a
+# fresh split whether or not an agent with the right context was sitting right
+# there.
+#
+# WHAT REUSE COSTS, WRITTEN DOWN BEFORE WHAT IT BUYS. Reuse punches a hole in
+# containment. Every other mechanism in this tool assumes a task's beliefs die
+# with its process — that is why `inproc` needs no containment machinery at all,
+# a fresh subprocess per task gets it for free. A reused pane keeps the session
+# alive across the boundary, so A WRONG BELIEF FORMED IN TASK A NOW SURVIVES
+# INTO TASK B. Task B's gate cannot see it: the done-command tests B's
+# artefacts, and a contaminated premise that produces a passing artefact passes.
+# That is the trade, and it is the reason the decision is DEFAULT-DENY and the
+# reason every answer goes in the ledger with the sentence that produced it.
+#
+# WHAT IT NEVER ASKS. It never asks whether a pane is alive, idle or busy.
+# `grep 'os.kill|kill(0|/proc/|pid_alive|agent list|is_alive'` across all three
+# executables returns nothing, that absence is deliberate (DESIGN §3j), and
+# CONTRIBUTING declines "Trusting a lifecycle state" by name — on this machine
+# `herdr agent list` reported two bare login shells as idle agents. So the only
+# question asked of the world is an ATTEMPT: run the command on the remembered
+# pane and see what came back. CONFIRMED on this machine, 2026-08-19:
+# `herdr pane run w99:p99 "echo hi"` exits 1 with
+# `{"error":{"code":"pane_not_found"}}`. An attempt that fails is a fact; a
+# lifecycle label that says `idle` is an opinion.
+
+REUSE_FORBIDDEN = "forbidden"
+REUSE_PREFERRED = "preferred"
+REUSE_PERMITTED = "permitted"
+
+
+def reuse_class(t: Task):
+    """What the ROLE permits, decided before any pane is looked for.
+
+    THIS IS NOT A PREFERENCE AND MUST NOT BE READ AS ONE. Grillin's validator
+    already enforces the first row — `check_adversary_context` fails a task
+    declaring `**Reader:** adversary` unless it also declares
+    `**Context:** fresh — not a subagent of the orchestrator, not a continued
+    session` — and a reused agent IS a continued session. Reusing a pane for the
+    adversarial pass would therefore make Smokin the thing that quietly breaks
+    the plan's own most load-bearing check, on a task that still carries the
+    declaration saying it did not. Grillin's check can only read the sentence;
+    this is the half that can act on it, and it is the highest-yield check in
+    the method, so getting it wrong silently is the worst outcome available.
+
+    The second row is the same rule pointing the other way. Grillin's
+    `check_health_checker` says a health reader's contamination is "required,
+    not disqualifying", and deliberately does not require a clean owner for it.
+    A health reader is the ONE role that gets better with the context it already
+    has, so reuse is what it wants, not what it tolerates.
+
+    Everything else is ordinary work: permitted, and bounded by the containment
+    note above."""
+    if t.reader == "adversary":
+        return REUSE_FORBIDDEN, (
+            "the adversarial pass must be a fresh context — Grillin's gate "
+            "requires '**Context:** fresh — not a subagent of the orchestrator, "
+            "not a continued session', and a reused agent is a continued session")
+    if t.reader == "health":
+        return REUSE_PREFERRED, (
+            "the health reader runs in rounds and its contamination is required, "
+            "not disqualifying — the context it already holds is the qualification")
+    return REUSE_PERMITTED, (
+        "ordinary work — reuse is allowed, and bounded by the containment cost: "
+        "a wrong belief formed in the earlier task survives into this one")
+
+
+def pane_history(plan: Plan, agent: str, exclude: str):
+    """The pane this persona last FINISHED a task in, read from files alone.
+
+    A persona is a label, not an addressable worker: `_ROSTER.md` prices
+    `implementer` and Grillin's own shipped example puts that same label on two
+    different tasks (CONFIRMED — `minimal-passing-plan` T2 and T3 both declare
+    `**Agent:** `implementer``). Nothing before this turned that label into a
+    thing you could send work to. A pane id does. This function is where the
+    label acquires a body, and the body is a line in a dispatch record.
+
+    NO NEW STORE. Dispatch records already survive completion — CONFIRMED, all
+    three `T*.json` were still on disk after a run that finished every task, and
+    only `smokin reset` unlinks them — so the persona-to-pane history is already
+    fully written down and this only reads it.
+
+    Returns (record, pending), where `pending` names the tasks this persona is
+    still inside. That distinction is the difference between "there is nothing
+    to reuse" and "the thing to reuse has not finished", and collapsing the two
+    would put the wrong sentence in the ledger."""
+    d = plan.priv / "dispatch"
+    if not agent or not d.is_dir():
+        return None, []
+    rid = plan.run_id()
+    best, pending = None, []
+    for f in sorted(d.glob("*.json")):
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue                      # a torn record is not a pane history
+        tid = rec.get("task")
+        if (rec.get("dispatch") != "pane" or rec.get("agent") != agent
+                or not tid or tid == exclude or not rec.get("pid_or_pane")):
+            continue
+        # THIS RUN ONLY, which is the rule its sibling mechanism already
+        # follows and this one did not. `smokin_memory` refuses cross-run
+        # recall because "the world moves between runs"; a pane held open
+        # across runs carries a whole previous run's context and carries it
+        # SILENTLY, which is the same claim with more of it. Two halves of one
+        # feature disagreeing, with no note anywhere, was the defect.
+        if rec.get("run") != rid:
+            continue
+        # AN ADVERSARY'S CONTEXT DOES NOT FLOW OUTWARD EITHER. `reuse_class`
+        # refuses to let an adversarial task inherit a pane; nothing stopped an
+        # ordinary task inheriting the ADVERSARY's, which hands the next worker
+        # the fresh independent reading the plan spent a whole task buying. The
+        # asymmetry was unexplained and is now closed from the same file the
+        # gate reads.
+        prior_t = plan.tasks.get(tid)
+        if prior_t is not None and prior_t.reader == "adversary":
+            continue
+        # THE ONE QUESTION THE FILESYSTEM CAN ANSWER. Not "is the pane idle" —
+        # that is a lifecycle belief and this design refuses to hold one. A
+        # RECEIPT.json is the worker's own statement that it stopped, written
+        # by its wrapper, and a task that reached a terminal state in the plan
+        # is a pane whose occupant is no longer mid-sentence.
+        # A RECEIPT THE WORKER WROTE, NOT ONE THE REAPER WROTE. The docstring
+        # above justifies this test with "a RECEIPT.json is the worker's own
+        # statement that it stopped" — and a reaped receipt is written by the
+        # REAPER (`terminal: "reaped"`, `source: "reaper"`, `exit: null`)
+        # precisely because the worker did NOT stop. Treating it as proof the
+        # pane is free sent a second agent into a pane whose first occupant was
+        # still running, and put "T1 finished in w9:p1" in the ledger while it
+        # had not. A reaped task belongs in `pending`: the distinction this
+        # function already draws between "nothing to reuse" and "the thing to
+        # reuse has not finished" is the right one, and this falls on the
+        # second side.
+        r = plan.receipt(tid) or {}
+        if not r or r.get("source") == "reaper" or r.get("terminal") == "reaped":
+            pending.append(tid)
+            continue
+        if best is None or rec.get("started_ns", 0) > best.get("started_ns", 0):
+            best = rec
+    return best, sorted(pending)
+
+
+def reuse_decision(plan: Plan, t: Task):
+    """DEFAULT-DENY, decided from files only. Returns the record that goes on
+    the dispatch record and into the ledger, whichever way it came out.
+
+    Every branch below returns a `why` that names the file that decided it. A
+    reuse mechanism whose declines are silent is indistinguishable from a reuse
+    mechanism that was never built — and the most common case by far is a plan
+    that declares no `**Agent:**` at all, so silence there would hide the
+    feature from exactly the people who most need to be told it is off."""
+    klass, because = reuse_class(t)
+    dec = {"class": klass, "because": because, "agent": t.agent or None,
+           "reader": t.reader or None, "allowed": False, "why": None,
+           "pane": None, "from_task": None, "used": False, "placement": None}
+    if not t.agent:
+        dec["why"] = ("agent-name-rejected" if t.agent_declared
+                      else "agent-not-declared")
+        if t.agent_declared:
+            dec["declared"] = t.agent_declared
+        return dec
+    if klass == REUSE_FORBIDDEN:
+        dec["why"] = "reader-adversary-must-be-fresh"
+        return dec
+    prior, pending = pane_history(plan, t.agent, exclude=t.id)
+    if prior is None:
+        dec["why"] = (f"prior pane still open on {', '.join(pending)} — no receipt yet"
+                      if pending else "no prior pane for this persona in this plan")
+        return dec
+    dec.update(allowed=True, pane=prior.get("pid_or_pane"),
+               from_task=prior.get("task"), placement=prior.get("placement"),
+               why=f"{prior.get('task')} finished in {prior.get('pid_or_pane')} "
+                   f"and left a receipt")
+    return dec
+
+
+def pane_census(plan: Plan):
+    """PANES OPENED PER RUN — the direct measurement of the incident.
+
+    The incident was a pane being OPENED, so the reading is a count of panes
+    opened, not of tasks dispatched, and the gap between the two is what reuse
+    bought. Both numbers come off `.smokin/dispatch/*.json` and nothing else: no
+    vendor state directory is read, no process is asked anything, and a cold
+    reader who has never seen this run recovers the same figures from the same
+    directory.
+
+    This is deliberately NOT tokens. Token capture measures what a dispatch
+    spent and only works on the headless path; reuse only happens in panes, and
+    the two halves do not overlap. Measuring reuse in tokens would mean reaching
+    into `~/.claude/projects`, which principle 14 and `smokin-run`:61 both
+    refuse. A pane count needs no vendor parsing at all and is the thing the
+    operator actually watched go wrong.
+
+    Records written before this feature existed carry no `reuse` key and count
+    as opened, which is exactly what they were."""
+    out = {"dispatches": 0, "opened": 0, "reused": 0, "distinct": 0}
+    d = plan.priv / "dispatch"
+    if not d.is_dir():
+        return out
+    seen = set()
+    for f in sorted(d.glob("*.json")):
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("dispatch") != "pane":
+            continue
+        out["dispatches"] += 1
+        if rec.get("pid_or_pane"):
+            seen.add(rec["pid_or_pane"])
+        if (rec.get("reuse") or {}).get("used"):
+            out["reused"] += 1
+        else:
+            out["opened"] += 1
+    out["distinct"] = len(seen)
+    return out
 
 
 def launch(plan: Plan, t: Task, rts: dict, dry=False):
@@ -405,7 +686,62 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     row = rts.get(t.runtime, {})
     (plan.priv / "dispatch").mkdir(parents=True, exist_ok=True)
 
+    # ── recall ──────────────────────────────────────────────────────────────
+    # Decided from files, before anything is asked of the world, exactly like
+    # the reuse decision below it. Scoped to THIS RUN: the archive keeps
+    # everything and a human reading `smokin memory` sees all of it, but only
+    # what this run observed is ever put in front of a worker (see
+    # smokin_memory's docstring for why crossing a run boundary is a bigger
+    # claim than this has measured).
+    #
+    # AND IT OBEYS THE ROLE GATE THE PANE PATH OBEYS. Recall used to consult
+    # `t.agent` and nothing else, so the adversary that `reuse_class` had just
+    # REFUSED a pane was handed the same persona's entries as a file — `kind:
+    # lesson` included, which this store defines as "a generalisation somebody
+    # drew", i.e. exactly the "merely concluded" half the containment rule says
+    # must not carry forward. A gate enforced on one channel and not the other
+    # is not a gate. The refusal is written with the SAME sentence the reuse
+    # decision writes, because it is the same rule.
+    klass, because = reuse_class(t)
+    forbidden = klass == REUSE_FORBIDDEN
+    entries = M.read(plan.priv) if (t.agent and not forbidden) else []
+    recall = M.for_agent(entries, t.agent, run=rid) if entries else []
+    rec_note = ({"recalled": 0, "why": "agent-name-rejected",
+                 "declared": t.agent_declared} if t.agent_declared and not t.agent
+                else {"recalled": 0, "why": "agent-not-declared"} if not t.agent
+                else {"recalled": 0, "why": "reader-adversary-must-be-fresh",
+                      "because": because} if forbidden
+                else {"recalled": 0, "why": "nothing remembered for this persona "
+                      "in this run"} if not recall
+                else {"recalled": len(recall), "agent": t.agent,
+                      "keys": [e.get("key") for e in recall],
+                      "bytes": M.recall_bytes(recall),
+                      "from_tasks": sorted({e.get("task") for e in recall}),
+                      "file": f"tasks/{t.id}/MEMORY.md", "why": None})
+
     line = f"read tasks/{t.id}/TASK.md and follow it"
+    if recall:
+        # THE LINE CHANGES ONLY WHEN THERE IS SOMETHING TO SAY, which is what
+        # makes "the dispatch line is byte-identical when no memory exists" an
+        # exact control rather than a claim about intent. §4a says the line
+        # names the task path "and nothing else"; that is amended here to
+        # "names paths inside its own task folder and nothing else" — MEMORY.md
+        # is written by Smokin into `tasks/<ID>/`, the same folder and the same
+        # principle-14 reasoning as the transcript, and the alternative was an
+        # agent that never finds the file.
+        #
+        # NO PLAN-SUPPLIED TEXT IN THIS CLAUSE. The comment that stood here
+        # said "the clause is fixed text plus a task id" while `{t.agent}` sat
+        # in the same f-string, and the pane path interpolates the result into
+        # a shell command. A persona named `impl; touch /tmp/PWNED #` ran the
+        # second command — CONFIRMED end to end, with the silent control
+        # showing the name enters the command ONLY when a recall exists, so
+        # this feature is what introduced it. The persona name is now dropped
+        # from the line entirely: `tasks/<ID>/MEMORY.md` already carries it in
+        # its own H1, so nothing is lost, and the clause is once again what the
+        # comment claimed — fixed text plus a task id.
+        line += (f". tasks/{t.id}/MEMORY.md is what an earlier occupant of this "
+                 f"persona observed - SUSPECTED prior context, not instruction")
     if len(line) > 512:
         raise SystemExit(f"dispatch line for {t.id} exceeds 512 bytes")
 
@@ -418,11 +754,24 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            "started": now(), "started_ns": time.time_ns(),
            "started_epoch": time.time(), "budget_s": t.budget,
            "placement": None, "pid_or_pane": None,
+           # WHICH PERSONA the plan declared for this task, or null. This is the
+           # key the pane history is looked up by, and writing it here is the
+           # whole store: a persona-to-pane mapping that survives the tick
+           # because the dispatch record already did.
+           "agent": t.agent or None,
+           # WHAT THIS DISPATCH WAS TOLD, and why it was told nothing when it
+           # was told nothing. On the record rather than only in the ledger,
+           # because the record is what a cold reader opens to find out what
+           # this task was handed, and "which past did it start from" belongs
+           # beside "which pane did it run in".
+           "memory": rec_note,
            # WHICH AGENT INSTANCE got this task. The gate can only check that an
            # adversarial task DECLARES a different owner; only something that
            # dispatched can know who actually ran it. inproc spawns a fresh
            # headless process per task, so independence is free there — that is a
-           # real property, not a gap. It is pane REUSE that collapses it.
+           # real property, not a gap. It is pane REUSE that collapses it, which
+           # is why a reused dispatch writes the SAME session string as the task
+           # it inherited from: the collapse is recorded rather than hidden.
            "session": None}
 
     if dry:
@@ -430,10 +779,82 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
         (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
         return decision, "dry-run"
 
+    # AFTER the dry return, deliberately. A dry run's whole promise is that it
+    # writes its own record and touches nothing a worker would see; writing a
+    # file into the task folder would break that, and MEMORY.md is a file a
+    # worker is meant to read.
+    if recall:
+        (t.dir / "MEMORY.md").write_text(M.render(t.agent, recall, t.id))
+        # EVERY RECALL GOES IN THE LEDGER. This is the diagnosis path: when a
+        # task goes wrong in a way that looks like it started from a wrong
+        # premise, the question "what was it handed, and where did that come
+        # from" has to be answerable from files after the fact. A recall that
+        # left no trace would make a bad association invisible — and a bad
+        # association is the specific failure this mechanism can cause that no
+        # other mechanism in the tool can.
+        ledger(plan, event="memory-recall", task=t.id, agent=t.agent,
+               n=len(recall), bytes=rec_note["bytes"], keys=rec_note["keys"],
+               from_tasks=rec_note["from_tasks"],
+               note="handed as SUSPECTED — the running system outranks it")
+    else:
+        ledger(plan, event="memory-recall", task=t.id, agent=t.agent or None,
+               n=0, why=rec_note["why"])
+
     wrapper = str(HERE / "smokin-run")
+    write_rec = lambda: (plan.priv / "dispatch" / f"{t.id}.json").write_text(
+        json.dumps(rec, indent=1) + "\n")
     if decision == "pane":
         tmpl = row.get("pane") or f"{t.runtime} {{LINE}}"
-        inner = tmpl.replace("{WT}", str(plan.root)).replace("{LINE}", line)
+        # QUOTED. Everything from `{LINE}` down is built by this file, but the
+        # cost of being wrong about that once was arbitrary command execution
+        # from a `**Agent:**` field, so the substitution no longer trusts its
+        # own input. `shlex.quote` makes the line exactly one argument, which
+        # is what every `pane` row in runtimes.json already means by `{LINE}`.
+        inner = (tmpl.replace("{WT}", str(plan.root))
+                     .replace("{LINE}", shlex.quote(line)))
+        cmd = (f"SMOKIN_PLAN={plan.root} SMOKIN_EMIT={HERE/'smokin-emit'} "
+               f"bash {wrapper} {t.id} -- {inner}")
+
+        # Decided from files, before anything is asked of the world. The answer
+        # rides on the dispatch record whichever way it went, so a cold reader
+        # can see not just which pane ran this task but why it was that pane.
+        rec["reuse"] = ru = reuse_decision(plan, t)
+        ledger(plan, event="reuse-decision", task=t.id, agent=ru["agent"],
+               reader=ru["reader"], allowed=ru["allowed"], klass=ru["class"],
+               why=ru["why"], because=ru["because"], pane=ru["pane"],
+               from_task=ru["from_task"])
+
+        if ru["allowed"]:
+            # THE ATTEMPT IS THE QUESTION. Nothing here asks herdr whether the
+            # pane is alive, because a false `idle` is indistinguishable from a
+            # finished agent (DESIGN §3j). It sends the command and reads the
+            # return code. CONFIRMED 2026-08-19: a pane that is gone answers
+            # `pane_not_found` and exits 1.
+            rec["placement"] = ru["placement"]
+            rec["pid_or_pane"] = ru["pane"]
+            rec["session"] = ru["pane"]
+            rec["reuse"]["used"] = True
+            # Written BEFORE the attempt, same as every other dispatch: if this
+            # process dies between here and the fall-back below, what is on disk
+            # is a task pointed at a pane with no receipt, which the reaper
+            # already knows how to turn into a result.
+            write_rec()
+            r = sh(["herdr", "pane", "run", ru["pane"], cmd])
+            if r and r.returncode == 0:
+                ledger(plan, event="pane-reused", task=t.id, agent=ru["agent"],
+                       pane=ru["pane"], from_task=ru["from_task"],
+                       klass=ru["class"],
+                       note="containment: this task inherits the earlier task's context")
+                return decision, f"{ru['pane']} (reused from {ru['from_task']})"
+            # The attempt answered no. That is a fact about the world and the
+            # only kind this design will act on — the decision above was a fact
+            # about the plan's files, and neither is a lifecycle opinion.
+            rec["reuse"]["used"] = False
+            rec["reuse"]["fallback"] = ("herdr pane run returned "
+                                        f"{r.returncode if r else 'nothing'}")
+            ledger(plan, event="reuse-fallback", task=t.id, agent=ru["agent"],
+                   pane=ru["pane"], why=rec["reuse"]["fallback"])
+
         pane = herdr_pane(plan, t)
         rec["placement"] = pane
         rec["pid_or_pane"] = pane and pane.get("pane")
@@ -441,10 +862,8 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
         # the dispatch record is written BEFORE launch: that is what makes a
         # missing receipt mean something rather than being indistinguishable
         # from never-dispatched.
-        (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
+        write_rec()
         if pane:
-            cmd = (f"SMOKIN_PLAN={plan.root} SMOKIN_EMIT={HERE/'smokin-emit'} "
-                   f"bash {wrapper} {t.id} -- {inner}")
             sh(["herdr", "pane", "run", pane["pane"], cmd])
             return decision, pane["pane"]
         return decision, "pane-unavailable"
@@ -471,21 +890,43 @@ def sh(argv, timeout=20):
 
 
 def herdr_pane(plan: Plan, t: Task):
-    """Create a pane. Optional by construction: if herdr is absent the task
-    still runs, it just runs without a screen."""
+    """Give this task its own TAB. Optional by construction: if herdr is absent
+    the task still runs, it just runs without a screen.
+
+    A TAB, NOT A SPLIT OF SOMEBODY ELSE'S PANE. This used to call
+    `herdr pane split --current`, and `--current` is the OPERATOR'S pane — so
+    every pane-dispatched task carved a slice out of whichever tab the human was
+    sitting in. Observed directly: a workspace reached nine panes with three of
+    them inside the operator's working tab, next to their own session and a
+    long-running agent that must not be disturbed, and their terminal shrank
+    with every dispatch. Nothing in the design intended that; `--current` was
+    simply the easiest flag to reach for.
+
+    A tab is full-size, labelled at creation, navigable, and leaves the
+    operator's layout exactly as they arranged it.
+
+    IT ALSO MAKES REUSE WORK. A tab persists and is addressable by id, so a
+    persona dispatched a second time returns to its own tab with its own
+    scrollback. A split pane is a slice of a layout somebody else owns and
+    cannot be returned to once that layout changes — panes actively fight the
+    reuse this file now does, and tabs make it natural.
+    """
     if os.environ.get("HERDR_ENV") != "1":
         return None
-    r = sh(["herdr", "pane", "split", "--current", "--direction", "right",
-            "--cwd", str(plan.root), "--no-focus"])
+    ws = os.environ.get("HERDR_WORKSPACE_ID", "")
+    r = sh(["herdr", "tab", "create", "--workspace", ws,
+            "--cwd", str(plan.root), "--label", f"smokin:{t.id}", "--no-focus"])
     if not r or r.returncode != 0:
         return None
     try:
-        pid = json.loads(r.stdout)["result"]["pane"]["pane_id"]
+        res = json.loads(r.stdout)["result"]
+        pid = res["root_pane"]["pane_id"]
+        tid = res["tab"]["tab_id"]
     except (ValueError, KeyError):
         return None
-    sh(["herdr", "pane", "rename", pid, f"smokin:{t.id}"])
-    return {"pane": pid, "workspace": os.environ.get("HERDR_WORKSPACE_ID"),
-            "tab": os.environ.get("HERDR_TAB_ID")}
+    # Labelled at creation, so there is no rename round-trip and no window in
+    # which the tab sits on the operator's bar with a meaningless name.
+    return {"pane": pid, "tab": tid, "workspace": ws}
 
 
 # ── reaping and verdicts ────────────────────────────────────────────────────
@@ -498,6 +939,15 @@ def reap(plan: Plan, close_panes=False):
     d = plan.priv / "dispatch"
     if not d.is_dir():
         return out
+    # The capability table, for one reason only: a reaped receipt still carries
+    # `result`, and what shape that is hiding in is the runtime's property.
+    # Read once outside the loop — reaping is not a place to re-read a file per
+    # task — and never allowed to abort the reap, because a plan whose
+    # runtimes.json went bad still has dead workers that must become results.
+    try:
+        rts = runtimes(plan)
+    except SystemExit:
+        rts = {}
     for f in sorted(d.glob("*.json")):
         try:
             rec = json.loads(f.read_text())
@@ -509,7 +959,26 @@ def reap(plan: Plan, close_panes=False):
         if time.time() - rec.get("started_epoch", 0) < rec.get("budget_s", DEFAULT_BUDGET):
             continue
         tr = plan.root / "tasks" / tid / ".smokin" / "transcript.log"
-        tail = "\n".join(tr.read_text(errors="replace").splitlines()[-20:]) if tr.is_file() else ""
+        text = tr.read_text(errors="replace") if tr.is_file() else ""
+        # THE SECOND PLACE THE TAIL BECOMES A JSON ENVELOPE. The emitter had the
+        # same 20-line fallback and both had to be fixed in one change, or a
+        # reaped task would carry a machine blob in `result` while a cleanly
+        # emitted one carried prose — the same field meaning two things
+        # depending on which path wrote it.
+        row = rts.get(rec.get("runtime"), {}) if rts else {}
+        # GUARDED, exactly like the `usage_from` call twenty lines down, and for
+        # the reason that call was guarded first: this reads a file a WORKER
+        # wrote. An unguarded `lift_result` let a `RecursionError` out of a
+        # deeply nested transcript line, out of `reap()` and out of the tick —
+        # one task's transcript ended the orchestrator for every other task in
+        # the plan, CONFIRMED with a healthy second task that then got no
+        # receipt. The scanner no longer raises it either; both halves landed,
+        # because one guard is a place a later change can quietly remove.
+        try:
+            tail = U.lift_result(text, row)
+        except Exception:
+            tail = None
+        tail = tail or "\n".join(text.splitlines()[-20:])
         receipt = {"schema": "smokin.receipt/1", "seq": rec["seq"], "run": rec["run"],
                    "task": tid, "attempt": rec.get("attempt", 1), "terminal": "reaped",
                    "claim": "partial", "runtime": rec.get("runtime"),
@@ -517,16 +986,105 @@ def reap(plan: Plan, close_panes=False):
                    "started": rec.get("started"), "ended": now(),
                    "wall_s": round(time.time() - rec.get("started_epoch", 0), 1),
                    "result": tail, "artifacts": {}, "placement": rec.get("placement")}
+        # A reaped worker is one that ran out of budget, so most of the time it
+        # printed no envelope and there is nothing to read. Sometimes it printed
+        # one and then hung, and that spend was still real — it is recorded when
+        # it is there and the key is absent when it is not. Never zero: a run
+        # killed at its budget is the single worst place to invent a zero cost.
+        try:
+            usage = ({"available": False, "reason": "pane-not-instrumented"}
+                     if rec.get("dispatch") == "pane" else U.usage_from(text, row))
+        except Exception:
+            usage = None
+        if usage:
+            receipt["usage"] = usage
         (plan.root / "tasks" / tid / "RECEIPT.json").write_text(json.dumps(receipt, indent=1) + "\n")
+        # REAPED TASKS ONLY, AND THAT IS DELIBERATE — this loop has already
+        # skipped every task that left a receipt, so a task that FINISHED keeps
+        # its tab. Closing on success would look tidier and would delete pane
+        # reuse in the same stroke: reuse sends the next task for a persona back
+        # into the tab the last one finished in, and a closed tab is a pane that
+        # answers `pane_not_found`. `--close` is reaper cleanup for a worker
+        # that never spoke, the help text and DESIGN §2f now say so, and the
+        # operator closes a finished tab the way they close any other.
         if close_panes and rec.get("dispatch") == "pane" and rec.get("pid_or_pane"):
             # SIGHUP, per experiment Q2b — the worker still gets to speak.
-            sh(["herdr", "pane", "close", str(rec["pid_or_pane"])])
+            #
+            # CLOSE THE TAB, NOT THE PANE. Each dispatched task now owns a whole
+            # tab, so closing only its pane would leave an EMPTY TAB on the
+            # operator's bar — one per reaped task, accumulating exactly the
+            # clutter that moving off pane-splitting was meant to remove. Fall
+            # back to the pane for dispatch records written before tabs existed,
+            # because a reap must work on a plan that was started by an older
+            # build.
+            tab = (rec.get("placement") or {}).get("tab")
+            if tab:
+                sh(["herdr", "tab", "close", str(tab)])
+            else:
+                sh(["herdr", "pane", "close", str(rec["pid_or_pane"])])
         ledger(plan, event="reaped", task=tid, seq=rec["seq"])
         out.append(tid)
     return out
 
 
-def take_verdict(plan: Plan, tid: str, write_status: bool = True):
+def remember_verdict(plan: Plan, t: Task, v: dict):
+    """A REFUTED gate is the one thing this tick observes that is worth carrying
+    forward, and it is worth carrying because it is already fully evidenced.
+
+    ONLY FAILURES. A gate that passed teaches the next occupant nothing — it
+    says the work was done, which is what the receipt and the verdict already
+    say, in two places, to a reader who can go and look. A gate that FAILED, and
+    the exact command that showed it, is precisely the thing the next agent
+    rediscovers by spending tokens, which is the incident this whole feature
+    traces to. It also makes the silent control exact: **a plan in which
+    everything passes writes no memory at all**, so the store cannot fill up
+    with the ordinary course of events.
+
+    THE TICK IS THE ONLY AUTOMATIC WRITER, and it writes only what it ran
+    itself. Nothing here reads FINDINGS.md and harvests sentences out of it: a
+    sentence an agent wrote about its own work has no command attached, would be
+    refused by the guard, and harvesting it anyway would be this file deciding
+    the guard applies to everyone else.
+
+    An entry with no persona could never be recalled by one, so it is not
+    written — and the decline goes in the ledger, because a plan that declares
+    no `**Agent:**` is the COMMON case (9 of 20 shipped TASK.md declare it) and
+    a mechanism that is silently off for most plans is indistinguishable from
+    one that was never built."""
+    if v.get("pass"):
+        return None
+    if not t.agent:
+        ledger(plan, event="memory-skipped", task=t.id, why="agent-not-declared",
+               note="a fact nobody can be identified by cannot be recalled by one")
+        return None
+    obs = (v.get("stderr") or "").strip() or (v.get("stdout") or "").strip() \
+        or v.get("why") or f"exit {v.get('exit')}, no output"
+    e = M.make("fact", t.agent, t.id,
+               claim=f"the gate for {t.id} did not pass (exit {v.get('exit')})",
+               observation=obs, command=v.get("cmd") or "", run=plan.run_id(),
+               source="verdict")
+    why = M.check(e)
+    if why:
+        # The guard bites the tick exactly as hard as it bites a human. A task
+        # with no `## Done means` produces a verdict with no `cmd`, and that
+        # verdict is refused here rather than stored as a fact whose evidence is
+        # an empty string. Being refused by your own guard is the check working.
+        ledger(plan, event="memory-refused", task=t.id, agent=t.agent,
+               source="verdict", why=why)
+        return None
+    M.append(plan.priv, e)
+    ledger(plan, event="memory-write", task=t.id, agent=t.agent, kind="fact",
+           key=e["key"], source="verdict", claim=e["claim"])
+    if M.crossed(M.read(plan.priv), e["key"]):
+        ledger(plan, event="skill-candidate", key=e["key"], claim=e["claim"],
+               personas=M.CANDIDATE_PERSONAS,
+               note="reported, not written — evidence a skill should exist is not "
+                    "authority to write one")
+    return e
+
+
+def take_verdict(plan: Plan, tid: str, write_status: bool = True,
+                 remember: bool = True):
     """The tick re-runs the task's OWN done-command. A receipt is the agent's
     CLAIM; the verdict is the project's. Principle 8 one level down: a receipt
     may be a precondition of the gate, it may never BE the gate."""
@@ -549,6 +1107,14 @@ def take_verdict(plan: Plan, tid: str, write_status: bool = True):
     if write_status:
         t.set_status("DONE" if v["pass"] else "BLOCKED")
     ledger(plan, event="verdict", task=tid, **{"pass": v["pass"]})
+    # `verify` passes remember=False, and the reason is the same one that made
+    # it pass write_status=False. `verify` is the door people adopt first
+    # BECAUSE it is read-only, and a command that quietly starts accumulating a
+    # memory store on somebody's disk the first time they try it is not
+    # read-only in the sense that made them try it. The tick dispatched the
+    # work and is entitled to record what it observed; verify did not.
+    if remember:
+        remember_verdict(plan, t, v)
     return v
 
 
@@ -729,9 +1295,6 @@ def print_invariants(rows):
 
 # ── verify — the tick with the fleet removed ────────────────────────────────
 
-RE_READER = re.compile(r"^\*\*Reader:\*\*", re.M | re.I)
-
-
 def verify(plan: Plan, only=None):
     """Run each task's OWN done-command and record what happened. That is all.
 
@@ -780,7 +1343,7 @@ def verify(plan: Plan, only=None):
         if tid not in plan.tasks:
             print(f"smokin: no such task: {tid}", file=sys.stderr)
             return 2
-        v = take_verdict(plan, tid, write_status=False)
+        v = take_verdict(plan, tid, write_status=False, remember=False)
         verdicted.append(tid)
         print(f"  verdict  {tid}  {'PASS' if v['pass'] else 'REFUTED'}")
 
@@ -789,10 +1352,41 @@ def verify(plan: Plan, only=None):
     # Independence cannot be established from here, so say so rather than let a
     # green line imply it. The gate checks the declaration; only something that
     # dispatched the work can check the actor, and nothing dispatched here.
+    #
+    # ONLY THE ADVERSARY. This used to fire on any `**Reader:**` at all, which
+    # put the same warning on the HEALTH reader — the one role whose
+    # contamination Grillin calls "required, not disqualifying". Warning that a
+    # health reader's independence is unverified is not a cautious reading, it is
+    # a wrong one: independence is not what that role is for, and the warning
+    # would now contradict pane reuse, which deliberately hands the health reader
+    # the same context again.
+    #
+    # AND WHERE THE PROOF IS ON DISK, IT IS A FAILURE AND NOT A NOTE. Both
+    # halves were already in files this command reads: the task declares
+    # `**Reader:** adversary` (plus the "not a continued session" sentence
+    # Grillin's gate demands), and its own dispatch record says
+    # `reuse.used: true` with the task it inherited from. Nothing joined them,
+    # so `verify` printed PASS and "independence is unverified" over a record
+    # stating in the same directory that independence was not merely unproven
+    # but broken. This is the one independence check `verify` can make from
+    # files alone: it starts nothing, edits no TASK.md and spends no model
+    # call, and it catches every route into a reused adversary — including the
+    # two regex divergences, which is why it is worth having even now that they
+    # are closed.
+    independence_broken = []
     for tid in sorted(plan.tasks):
-        if RE_READER.search(plan.tasks[tid].path.read_text(errors="replace")):
-            print(f"  note     {tid} is declared adversarial. Nothing ran it here, so its "
-                  f"independence is unverified.")
+        if plan.tasks[tid].reader != "adversary":
+            continue
+        ru = (plan.dispatch_rec(tid) or {}).get("reuse") or {}
+        if ru.get("used"):
+            independence_broken.append(tid)
+            print(f"  FAIL     {tid} declares '**Reader:** adversary' and its dispatch "
+                  f"record says it inherited {ru.get('pane')} from {ru.get('from_task')}. "
+                  f"A reused agent IS a continued session, which is the one thing the "
+                  f"task's own '**Context:** fresh' declaration says it is not.")
+            continue
+        print(f"  note     {tid} is declared adversarial. Nothing ran it here, so its "
+              f"independence is unverified.")
 
     st = render_status(plan, [], verdicted, [], [], (), None, inv_rows)
     write_progress(plan, st)
@@ -810,6 +1404,11 @@ def verify(plan: Plan, only=None):
 
     ver = st["counts"]["verified"]
     print(f"\n{ver} of {st['total']} verified · see PROGRESS.md")
+    if independence_broken:
+        print(f"{len(independence_broken)} adversarial task(s) ran in an inherited "
+              f"context: {', '.join(independence_broken)}. The gates may all pass and "
+              f"the adversarial pass still be worth nothing.")
+        return 1
     return 0 if plan.tasks and ver == st["total"] else 1
 
 
@@ -878,7 +1477,12 @@ def tick(plan: Plan, dry=False, close_panes=False):
     for tid in plan.frontier():
         t = plan.tasks[tid]
         decision, _ = t.route()
-        adversarial = bool(RE_READER.search(t.path.read_text(errors="replace")))
+        # THE ADVERSARY, NOT ANY READER. This was `bool(RE_READER.search(...))`,
+        # which fired on the health reader too and told an operator that a role
+        # whose contamination is REQUIRED had got a clean, separate session. The
+        # two roles have opposite contamination rules, so one sentence cannot be
+        # true of both.
+        adversarial = t.reader == "adversary"
         if decision == "pane" and live_panes >= ceiling:
             queued.append((tid, "pane-ceiling"))
             continue
@@ -905,8 +1509,32 @@ def tick(plan: Plan, dry=False, close_panes=False):
             # case Smokin did NOT dispatch — a human relaying every task to one
             # agent — that collapses it, and only `smokin verify` speaks to that.
             sess = (plan.dispatch_rec(tid) or {}).get("session")
-            print(f"           {tid} is the reader; it got its own session ({sess}), "
+            print(f"           {tid} is the adversary; it got its own session ({sess}), "
                   f"separate from every other task in this run.")
+        # Panes only. An inproc dispatch is a fresh subprocess by construction,
+        # so there is nothing there to reuse and nothing to say about it — which
+        # is also why a plan with no pane tasks prints none of this and writes no
+        # reuse events at all.
+        # Read with `.get` throughout, never by key. This is a FILE, and it may
+        # have been written by a different version of this program than the one
+        # reading it — that is the whole premise of a stateless tick. A narrator
+        # that raises on an unfamiliar record turns a cosmetic difference into a
+        # dead plan.
+        ru = (plan.dispatch_rec(tid) or {}).get("reuse")
+        if ru and not dry:
+            if ru.get("used"):
+                print(f"           {tid} REUSED {ru.get('pane')} from "
+                      f"{ru.get('from_task')} ({ru.get('class')}). Its context carries "
+                      f"over — so does anything {ru.get('from_task')} got wrong.")
+            else:
+                # `why` is why the DECISION came out as it did; `fallback` is why
+                # the decision did not survive contact with the world. Printing
+                # `why` in the fallback case read as "reuse permitted, T1 left a
+                # receipt" on a line announcing a fresh pane — true, and exactly
+                # the wrong half of the story. Caught on a real herdr run.
+                print(f"           {tid} opened a fresh pane — reuse "
+                      f"{ru.get('class')}, "
+                      f"{ru.get('fallback') or ru.get('why')}")
 
     plan.__init__(plan.root)
     st = render_status(plan, reaped, list(verdicts), dispatched, queued, rulings, None, inv_rows)
@@ -984,6 +1612,11 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
                                 "supersedes": v.get("supersedes")} for v in held),
                               key=lambda x: x["seq"] or 0),
             "id": tid, "state": s, "owner": t.owner, "runtime": t.runtime,
+            "agent": t.agent or None, "reader": t.reader or None,
+            # Not "which pane" — which task's CONTEXT this one is standing in.
+            # Null on every task that got its own, which is still most of them.
+            "reused_from": ((d.get("reuse") or {}).get("from_task")
+                            if (d.get("reuse") or {}).get("used") else None),
             "dispatch": (d.get("dispatch") or t.route()[0]),
             "clause": d.get("clause"), "where": d.get("pid_or_pane"),
             "blocked_by": sorted(t.blocked_by),
@@ -1002,6 +1635,16 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
     st = {"schema": "smokin.status/2", "run": plan.run_id(), "at": now(),
           "plan": str(plan.root), "size": plan.size(),
           "pane_ceiling": PANE_CEILING[plan.size()],
+          # The incident's own number. Six agents idle, a seventh pane opened —
+          # so what this run has to answer for is how many panes it OPENED, not
+          # how many tasks it dispatched into panes.
+          "panes": pane_census(plan),
+          # Additive, and the schema stays `smokin.status/2` for the same reason
+          # the receipt stayed `/1` when `usage` arrived: a reader that does not
+          # know about this key ignores it, which is what additive means, and a
+          # version bump would cost every reader in this repo and in Grillin a
+          # branch to gain nothing.
+          "memory": M.census(M.read(plan.priv), plan.run_id()),
           "counts": counts, "total": len(plan.tasks), "tasks": rows,
           "frontier": plan.frontier(),
           "judgement": {"active": plan.rules.active, "source": plan.rules.source,
@@ -1139,6 +1782,61 @@ def write_progress(plan: Plan, st: dict):
                  f"{t['owner'] or '—'} | {where} | {', '.join(t['waiting_on']) or '—'} |")
     L.append("")
 
+    pc = st.get("panes") or {}
+    if pc.get("dispatches"):
+        L.append("## What this run cost in panes")
+        L.append("")
+        L.append(f"**{pc['opened']} pane(s) opened** for {pc['dispatches']} pane "
+                 f"dispatch(es); {pc['reused']} reused a persona that had already "
+                 f"finished a task in this plan.")
+        L.append("")
+        inherited = [t for t in st["tasks"] if t.get("reused_from")]
+        for t in inherited:
+            L.append(f"- **{t['id']}** is standing in **{t['reused_from']}**'s context "
+                     f"(persona `{t['agent']}`, pane `{t['where']}`)")
+        if inherited:
+            L.append("")
+        L.append("*This is the reading the original incident had no number for: six agents "
+                 "sat idle holding exactly the context the next tasks needed, and a seventh "
+                 "pane was opened. **Reuse is not free.** A reused pane keeps the session "
+                 "alive across the task boundary, so a wrong belief formed in the earlier "
+                 "task survives into the later one, and the later task's own done-command "
+                 "cannot see it. Every decision, taken and declined, is in "
+                 "`.smokin/ledger.jsonl` with the sentence that decided it.*")
+        L.append("")
+
+    mem = st.get("memory") or {}
+    # Only when there IS something. A plan that never refuted a gate has an
+    # empty store, and an empty store renders NOTHING — which is what makes
+    # "PROGRESS.md gains no memory section when nothing was remembered" an exact
+    # control rather than a promise. It is also the honest picture: a heading
+    # over a zero is a feature advertising itself.
+    if mem.get("entries"):
+        L.append("## What this run wrote down")
+        L.append("")
+        L.append(f"**{mem['entries']} entr(ies)** across {len(mem['personas'])} "
+                 f"persona(s) — {mem['facts']} observed by the tick, {mem['lessons']} "
+                 f"written by hand. {mem['this_run']} of them are in scope for recall "
+                 f"in this run.")
+        L.append("")
+        L.append("*Every entry carries the task it came from, what was observed, and "
+                 "the command that produced it — an entry without that triple is refused "
+                 "at write time, because advice nobody can re-run reads exactly like a "
+                 "fact. What is handed to a dispatched agent is marked SUSPECTED and "
+                 "never as instruction: it is a document written against a snapshot, and "
+                 "the running system outranks it. Every recall is in "
+                 "`.smokin/ledger.jsonl`, so a wrong association is diagnosable rather "
+                 "than invisible.*")
+        L.append("")
+        for c in mem.get("skill_candidates") or []:
+            L.append(f"> **Skill candidate.** {len(c['personas'])} different personas "
+                     f"({', '.join(f'`{p}`' for p in c['personas'])}) observed the same "
+                     f"thing: *{c['claim']}*. That has stopped being one agent's "
+                     f"experience. **No skill has been written** — a skill is a document "
+                     f"somebody has to keep true, and evidence that one should exist is "
+                     f"not authority to write it.")
+            L.append("")
+
     tt = st["this_tick"]
     if any(tt.values()):
         L.append("## What changed this tick")
@@ -1240,7 +1938,12 @@ def reset(plan: Plan, run):
         # says so precisely: the done-command passes before any work is done,
         # so an orchestrator would mark unstarted work complete. Found by
         # running validate-plan.py against this repo's own example.
-        for f in ("RECEIPT.json", "VERDICT.json", ".smokin/emit.lock",
+        # MEMORY.md goes with them, and it is the one file in this list that
+        # Smokin wrote rather than the worker: it is a RECALL, rendered for one
+        # dispatch out of the store. Leaving it behind would hand the next
+        # occupant of this task a file the next dispatch did not decide to give
+        # it. The store itself is not touched — see below.
+        for f in ("RECEIPT.json", "VERDICT.json", ".smokin/emit.lock", "MEMORY.md",
                   "FINDINGS.md", "CHANGES.md", "QUESTIONS.md"):
             p = plan.root / "tasks" / tid / f
             if p.exists():
@@ -1259,6 +1962,12 @@ def reset(plan: Plan, run):
                                     "retires": rec.get("seq"), "outcome": rec.get("outcome"),
                                     "because": f"retired by `smokin reset` (was: {rec.get('because')})"})
         retired += 1
+    # `.smokin/memory.jsonl` is NOT deleted, for the reason directly above: an
+    # entry is an observation with the command that produced it, and deleting it
+    # would make `smokin reset` the cheapest way to erase an inconvenient
+    # measurement. It does not leak into the next run either — recall filters on
+    # the run id, and reset removes `run.json`, so the next run gets a new one
+    # and starts its recall empty. The archive stays readable via `smokin memory`.
     # The baseline IS deleted, and that is not inconsistent with keeping rulings.
     # A ruling is a judgement someone made and must stay readable; a baseline is a
     # measurement of one run's starting world, and after a reset that world is not
@@ -1270,6 +1979,105 @@ def reset(plan: Plan, run):
     (plan.priv / "run.json").unlink(missing_ok=True)
     print(f"reset: removed {n} artefact(s), retired {retired} ruling(s); "
           f"all tasks back to NOT STARTED")
+    return 0
+
+
+def show_memory(plan: Plan):
+    """Read-only. A store nothing can print is a store nobody can audit, and
+    this one is the only mechanism in the tool that puts words in front of a
+    worker — which makes being able to read exactly what it would say the
+    minimum price of shipping it."""
+    entries = M.read(plan.priv)
+    rid = plan.run_id()
+    print(f"plan:   {plan.root}")
+    print(f"store:  {M.store(plan.priv)}"
+          f"{'' if M.store(plan.priv).is_file() else '  (none yet)'}")
+    if not entries:
+        print("\nNothing has been written down. The tick writes a fact when a gate is "
+              "REFUTED and\nthe task declares an `**Agent:**`; `smokin remember` is the "
+              "hand-written door.")
+        return 0
+    by = {}
+    for e in entries:
+        by.setdefault(e.get("agent") or "(no persona)", []).append(e)
+    for agent in sorted(by):
+        rows = by[agent]
+        live = sum(1 for e in rows if e.get("run") == rid)
+        print(f"\n{agent} — {len(rows)} entr(ies), {live} in scope for recall this run")
+        for e in rows:
+            scope = "recalled" if e.get("run") == rid else "archived"
+            print(f"  [{scope}] {e.get('kind')} · {e.get('task')} · {e.get('at')}")
+            print(f"    {e.get('claim')}")
+            print(f"    $ {e.get('command')}")
+    cands = M.candidates(entries)
+    if cands:
+        print(f"\nSKILL CANDIDATES — the same observation from "
+              f"{M.CANDIDATE_PERSONAS}+ different personas:")
+        for c in cands:
+            print(f"  {c['claim']}")
+            print(f"    personas: {', '.join(c['personas'])}")
+        print("\nReported, not written. A skill is a document somebody has to keep true;")
+        print("evidence that one should exist is not authority to write it.")
+    else:
+        print(f"\nNo skill candidate — no single observation has come from "
+              f"{M.CANDIDATE_PERSONAS} different personas.")
+    print(f"\nRecall hands a dispatched agent at most {M.RECALL_MAX} entries from this "
+          f"run, marked\nSUSPECTED. Nothing auto-applies. Every recall is in "
+          f"`.smokin/ledger.jsonl`.")
+    return 0
+
+
+def remember(plan: Plan, a):
+    """The hand-written door, and the door the guard exists for.
+
+    The tick writes facts it observed itself. This is where a human — or an
+    agent that was told to, or a judge who noticed something — writes a LESSON,
+    which is the generalisation step, which is exactly the step where the
+    evidence normally gets left behind. So it is refused without the command,
+    loudly and with a non-zero exit, rather than stored with a warning: a stored
+    warning is still stored, and still gets recalled.
+
+    THE OBVIOUS SECOND AUTOMATIC SOURCE IS DELIBERATELY NOT WIRED. The rulings
+    layer produces a judgement with a `because`, which reads like the most
+    valuable thing in the plan to remember — and it has no command behind it,
+    so it would be refused by this same guard. That is the guard being right,
+    not the guard being inconvenient: a judgement is somebody's reasoning about
+    evidence, not the evidence, and the place for it is `rulings.jsonl` where it
+    already keeps its whole trail. If a judge wants something remembered, a
+    human can run this command and attach the command that would show it."""
+    e = M.make(a.kind, a.agent, a.task, a.claim, a.observation, a.command,
+               run=plan.run_id(), source="remember")
+    why = M.check(e)
+    # AND THE TASK HAS TO EXIST. `check` cannot see a plan directory and should
+    # not learn to; this is the caller's half. `--task T999-does-not-exist` was
+    # stored and recalled with provenance that pointed at nothing, which is the
+    # one thing an entry's own provenance line is for. A file check, not a
+    # semantic one: it kills invented provenance and makes no claim about
+    # whether a real id is the RIGHT id.
+    if not why and e["task"] not in plan.tasks:
+        known = ", ".join(sorted(plan.tasks)) or "none"
+        why = (f"refused: task {e['task']!r} is not a task in this plan (known: "
+               f"{known}). Every entry names the task it came from, and a "
+               f"provenance line pointing at nothing is worse than no entry — a "
+               f"reader who goes to check it finds an empty folder and cannot "
+               f"tell a typo from a fabrication.")
+    if why:
+        print(f"smokin: {why}", file=sys.stderr)
+        ledger(plan, event="memory-refused", task=a.task, agent=a.agent,
+               source="remember", why=why)
+        return 2
+    M.append(plan.priv, e)
+    ledger(plan, event="memory-write", task=e["task"], agent=e["agent"],
+           kind=e["kind"], key=e["key"], source="remember", claim=e["claim"])
+    print(f"remembered [{e['kind']}] for `{e['agent']}`: {e['claim']}")
+    print(f"  it will be recalled to `{e['agent']}` in run {e['run']}, marked SUSPECTED, "
+          f"bounded to {M.RECALL_MAX} entries.")
+    if M.crossed(M.read(plan.priv), e["key"]):
+        ledger(plan, event="skill-candidate", key=e["key"], claim=e["claim"],
+               personas=M.CANDIDATE_PERSONAS,
+               note="reported, not written")
+        print(f"\nSKILL CANDIDATE: {M.CANDIDATE_PERSONAS} different personas have now "
+              f"observed this.\nReported, not written — see `smokin memory`.")
     return 0
 
 
@@ -1391,14 +2199,30 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["doctor", "tick", "verify", "run", "status", "present",
-                                    "reap", "reset", "rulings", "invariants", "resume"])
+                                    "reap", "reset", "rulings", "invariants", "resume",
+                                    "memory", "remember"])
     ap.add_argument("plan", nargs="?", default=".")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--close", action="store_true", help="reap also closes the pane (SIGHUP)")
+    ap.add_argument("--close", action="store_true",
+                    help="closes the TAB of each task the reaper had to give up on "
+                         "(SIGHUP). Not tasks that finished — their tab is what pane "
+                         "reuse returns to")
     ap.add_argument("--run", default=None)
     ap.add_argument("--task", default=None, help="verify: gate one task instead of all")
     ap.add_argument("--recapture", action="store_true",
                     help="invariants: take a new baseline. Deliberate, and it goes in the ledger")
+    # `remember`. `--task` is shared with `verify` on purpose — it means the same
+    # thing in both places, which is the whole reason a provenance field is
+    # allowed to be reused rather than renamed.
+    ap.add_argument("--agent", default=None, help="remember: the persona this is about")
+    ap.add_argument("--claim", default=None, help="remember: one line, what was learned")
+    ap.add_argument("--observation", default=None,
+                    help="remember: what was actually seen. Required")
+    ap.add_argument("--command", default=None,
+                    help="remember: the command that produced it. Required — an entry "
+                         "nobody can re-run is not stored")
+    ap.add_argument("--kind", default="lesson", choices=["fact", "lesson"],
+                    help="remember: 'fact' (observed) or 'lesson' (generalised)")
     ap.add_argument("--max-ticks", type=int, default=200)
     ap.add_argument("--interval", type=float, default=3.0)
     ap.add_argument("--version", action="version",
@@ -1420,7 +2244,7 @@ def main():
     # no plan around it is how you get a fleet nobody can resume — the thing the
     # plan directory exists to prevent. Say which commands apply rather than
     # failing with a stack trace or, worse, quietly doing it.
-    READ_ONLY = {"verify", "doctor", "status", "present", "invariants"}
+    READ_ONLY = {"verify", "doctor", "status", "present", "invariants", "memory"}
     if getattr(plan, "single", False) and a.cmd not in READ_ONLY:
         print(f"smokin: {root} is a single task, not a plan — `{a.cmd}` needs a plan "
               f"directory with tasks/. Available here: {', '.join(sorted(READ_ONLY))}.",
@@ -1433,6 +2257,10 @@ def main():
         return reset(plan, a.run)
     if a.cmd == "rulings":
         return show_rulings(plan)
+    if a.cmd == "memory":
+        return show_memory(plan)
+    if a.cmd == "remember":
+        return remember(plan, a)
     if a.cmd == "invariants":
         return show_invariants(plan, a.recapture)
     if a.cmd == "resume":

@@ -28,6 +28,10 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import smokin_usage as U                                       # noqa: E402
+
+HERE = Path(__file__).resolve().parent
 BUDGET_S = 2.0
 RESULT_MAX = 8192
 
@@ -119,12 +123,69 @@ def main() -> int:
     if (tdir / "QUESTIONS.md").is_file() and (tdir / "QUESTIONS.md").stat().st_size > 0:
         claim = "blocked"
 
+    # The capability table, read here for exactly one reason: the transcript's
+    # SHAPE is a property of the runtime, and the runtime is named on the
+    # dispatch record. Nothing else in this file branches on a vendor and this
+    # does not either — it looks up a row and hands it to one scanner.
+    row = {}
+    try:
+        row = U.load_runtimes(
+            [plan / ".smokin" / "runtimes.json",
+             HERE.parent / "templates" / "runtimes.json"]).get(disp.get("runtime"), {})
+    except Exception:
+        row = {}
+
+    transcript = ""
+    tr = priv / "transcript.log"
+    if tr.is_file():
+        try:
+            transcript = tr.read_text(errors="replace")
+        except OSError:
+            transcript = ""
+
+    # THE ORDER HERE IS THE WHOLE FIX. `result` is the field a human reads, and
+    # the fallback below used to be the last 20 transcript lines full stop. The
+    # moment a runtime is given `--output-format json` those 20 lines become
+    # the JSON envelope, and the receipt starts carrying a machine blob where
+    # prose used to be. So: the fragment first (a native hook that already knows
+    # the answer), then the runtime's declared envelope, and only then the tail.
+    # A runtime that declares no envelope reaches the tail exactly as before.
     result = frag.get("result")
-    if not result:
-        tr = priv / "transcript.log"
-        if tr.is_file():
-            result = "\n".join(tr.read_text(errors="replace").splitlines()[-20:])
+    if not result and transcript:
+        # GUARDED like the usage block below it, and for the reason that block
+        # states: instrumentation never breaks a dispatch. An unguarded
+        # `lift_result` on a deeply nested transcript line raised
+        # `RecursionError` — not a `ValueError`, so the scanner's except did not
+        # hold it — and the worker's whole RECEIPT.json was lost while `emit`
+        # exited 0. The tail below is the honest fallback; losing the receipt
+        # was not.
+        try:
+            result = U.lift_result(transcript, row)
+        except Exception:
+            result = None
+    if not result and transcript:
+        result = "\n".join(transcript.splitlines()[-20:])
     result = (result or "")[:RESULT_MAX]
+
+    # Instrumentation never breaks a dispatch. A receipt withheld because a
+    # token count could not be parsed would trade the thing that matters for
+    # the thing that is nice to have, so every failure mode here is "no usage
+    # key" and none of them is "no receipt".
+    usage = None
+    try:
+        if disp.get("dispatch") == "pane":
+            # NOT a runtime that reported nothing — a path that cannot see. A
+            # pane's output goes to a screen, and the transcript the wrapper
+            # tees is the only source this design will read (the vendor state
+            # directories that hold the real numbers are barred by principle
+            # 14, same ruling as smokin-run:61). Saying so explicitly is what
+            # lets a later reader tell silence from blindness; omitting the key
+            # would make half the fleet look like it reported nothing.
+            usage = {"available": False, "reason": "pane-not-instrumented"}
+        elif transcript:
+            usage = U.usage_from(transcript, row)
+    except Exception:
+        usage = None
 
     receipt = {
         "schema": "smokin.receipt/1",
@@ -143,6 +204,17 @@ def main() -> int:
                       ("FINDINGS.md", "CHANGES.md", "QUESTIONS.md")},
         "transcript": str((priv / "transcript.log").relative_to(plan)),
     }
+    # OPTIONAL, and the schema stays smokin.receipt/1. Bumping to /2 for a
+    # purely additive key would cost every reader in this repo and in Grillin
+    # a version branch to gain nothing; a reader that does not know about
+    # `usage` ignores it, which is the definition of additive. DESIGN §3f
+    # carries the same sentence.
+    #
+    # ABSENT means the runtime said nothing. It never means it said zero, and
+    # the two are not interchangeable: a zero survives an average and an
+    # absence does not.
+    if usage:
+        receipt["usage"] = usage
 
     # 3 · the receipt
     atomic_write(tdir / "RECEIPT.json", json.dumps(receipt, indent=1) + "\n")
@@ -158,9 +230,13 @@ def main() -> int:
                              "receipt": f"tasks/{task_id}/RECEIPT.json"}) + "\n")
     os.rename(spool / "tmp" / name, spool / "inbox" / name)
 
+    # Spend rides on the ledger line too, so "what did this run cost" is one
+    # pass over ledger.jsonl rather than a walk of every task folder — the same
+    # reason wall-clock was already derivable from here.
+    extra = {"usage": usage} if usage else {}
     log(plan, event="emitted", task=task_id, seq=receipt["seq"],
         terminal=terminal, claim=claim, source=source,
-        emit_ms=int((time.time() - t0) * 1000))
+        emit_ms=int((time.time() - t0) * 1000), **extra)
     return 0
 
 

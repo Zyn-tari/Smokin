@@ -14,6 +14,12 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  \033[31mFAIL\033[0m  %s — %s\n' "$1" "$2"; }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want '$3', got '$2'"; fi; }
+# The GREEN token, not the word. `grep -c PASS` also counts a check whose LABEL
+# contains "PASS" — three sub-harnesses have one ("...the summary AGREES", the
+# verdict lines) and each was reporting one check more than it ran. A harness
+# that overstates its own count is the same defect as prose that overstates,
+# and it is the number this file exists to be trusted about.
+count_pass() { grep -c "$(printf '\033')\[32mPASS" "$1"; }
 
 newplan() { # $1 = dir, $2 = budget
   rm -rf "$1"; mkdir -p "$1"/{tasks/{T1,T2},.smokin}
@@ -194,7 +200,7 @@ fi
 # walking a happy path. Run here so one command still covers the whole tool.
 echo
 if python3 "$ROOT/tests/test-rulings.py" > "$LAB/rulings.out" 2>&1; then
-  n=$(grep -c 'PASS' "$LAB/rulings.out")
+  n=$(count_pass "$LAB/rulings.out")
   ok "delegation node: $n ruling checks"
 else
   bad "delegation node" "see below"
@@ -208,11 +214,62 @@ fi
 # kind of claim and deserves the same kind of proof.
 echo
 if python3 "$ROOT/tests/test-invariants.py" > "$LAB/invariants.out" 2>&1; then
-  n=$(grep -c 'PASS' "$LAB/invariants.out")
+  n=$(count_pass "$LAB/invariants.out")
   ok "plan invariants: $n blast-radius checks"
 else
   bad "plan invariants" "see below"
   cat "$LAB/invariants.out"
+fi
+
+# ── 9 · token capture ───────────────────────────────────────────────────────
+# Sections 1-8 measure whether the work FINISHED and whether the claim was
+# TRUE. None of them measures what it SPENT — which is why "does reusing an
+# agent's context save anything" had no answer when six idle agents were
+# abandoned for a seventh pane. Own harness, because the claim is about three
+# real vendors' output and is mutation-proven against the parser, the
+# descriptor table and the receipt separately.
+echo
+if python3 "$ROOT/tests/test-usage.py" > "$LAB/usage.out" 2>&1; then
+  n=$(count_pass "$LAB/usage.out")
+  ok "token capture: $n spend checks"
+else
+  bad "token capture" "see below"
+  cat "$LAB/usage.out"
+fi
+
+# ── 10 · pane reuse, and who is allowed it ──────────────────────────────────
+# Section 9 measures what a dispatch SPENT. It cannot measure the waste the
+# operator actually watched, because that waste happens in panes and the
+# headless path is the only one instrumented. This is the other half: the six
+# idle agents holding context, and the seventh pane. Own harness, because the
+# load-bearing claim is a REFUSAL — the adversarial pass must be denied a pane
+# it would otherwise have been handed — and a refusal is only proved by a
+# control that shows the identical plan being allowed it.
+echo
+if python3 "$ROOT/tests/test-reuse.py" > "$LAB/reuse.out" 2>&1; then
+  n=$(count_pass "$LAB/reuse.out")
+  ok "pane reuse: $n identity and containment checks"
+else
+  bad "pane reuse" "see below"
+  cat "$LAB/reuse.out"
+fi
+
+# ── 11 · agent memory ───────────────────────────────────────────────────────
+# Section 10 keeps a context alive across a task boundary — but only while the
+# pane exists, only inside one run, and never on the headless path, where a
+# fresh subprocess per task is where containment comes from. This is what
+# survives the process instead: not the context, which is not reconstructable,
+# but an observation and the command that produced it. Own harness, because the
+# load-bearing claim is again a REFUSAL — an entry with no command behind it is
+# not stored — and because the mechanism puts words in front of a worker, which
+# nothing else in this tool does.
+echo
+if python3 "$ROOT/tests/test-memory.py" > "$LAB/memory.out" 2>&1; then
+  n=$(count_pass "$LAB/memory.out")
+  ok "agent memory: $n provenance and recall checks"
+else
+  bad "agent memory" "see below"
+  cat "$LAB/memory.out"
 fi
 
 echo

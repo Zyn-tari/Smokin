@@ -14,37 +14,96 @@
     "back to `headless`, which means the roster's pairing was REQUESTED and not applied —",
     "and the ruling records that as pairing_enforced, rather than claiming a model that",
     "never ran. A record that asserts an unapplied pairing is the defect class this whole",
-    "tool exists to catch, so it is not asserted."
+    "tool exists to catch, so it is not asserted.",
+    "",
+    "EVERY LAUNCH STRING MUST BE WHITESPACE-SAFE. `launch()` builds argv as `head.split()`,",
+    "so `--output-format json` is fine and any flag whose VALUE contains a space is not —",
+    "it would arrive as two argv entries and the vendor would reject the second one.",
+    "",
+    "`result_from` and `usage` — two readings of the transcript smokin-run already tees.",
+    "They exist because the ledger records events and timestamps, so wall-clock, retries",
+    "and first-pass verdict rate were derivable, and SPEND was not. Six agents were left",
+    "idle holding context a seventh pane was then opened to rebuild; nobody could say what",
+    "that cost, because nothing measured it.",
+    "",
+    "  result_from : {select, match, path}   which record carries the final assistant text",
+    "  usage       : {select, match, map, cost_usd}   which record carries the numbers",
+    "",
+    "  select  'last' = the run total is already totalled by the vendor; take the last match",
+    "          'sum'  = the vendor reports PER STEP and the run total is their sum",
+    "          'join' = the vendor STREAMS the text in chunks (result_from only)",
+    "  match   every key/value must equal, on the record; absent means any object",
+    "  map     receipt key -> dotted path FROM THE RECORD ROOT. Not from a `usage` prefix:",
+    "          claude puts tokens under .usage and cost at the top level, so no single",
+    "          prefix addresses both, and a descriptor needing an escape hatch for its own",
+    "          first runtime is the wrong descriptor.",
+    "",
+    "COST IS NOT TOKENS AND THE TWO ARE NOT ONE CAPABILITY. `cost_usd` is declared only by",
+    "a runtime that actually reports one. codewhale reports tokens and no cost at all, so",
+    "its row has no cost_usd key and its receipts will never carry the field. The",
+    "alternative — a price table this repository invents — is an unearned assertion.",
+    "",
+    "A row with NEITHER key is not broken. It is a runtime nobody has measured yet, its",
+    "receipts carry no `usage`, and that absence is the honest reading."
   ],
 
   "claude": {
-    "headless": "claude -p --permission-mode acceptEdits",
+    "headless": "claude -p --permission-mode acceptEdits --output-format json",
     "judge": "claude -p --permission-mode acceptEdits --model {MODEL}",
     "pane": "claude",
     "holds_credentials": false,
     "hook_scope": "project-and-global",
-    "verified": "installed; headless CONFIRMED present at ~/.npm-global/bin/claude",
-    "note": "A per-pane --settings accelerant is NOT shipped: whether it merges or replaces is untested, and if it replaces it would silently disable herdr's own state hook and Grillin's awareness hooks. Open question Q3."
+    "result_from": {"select": "last", "match": {"type": "result"}, "path": "result"},
+    "usage": {
+      "select": "last",
+      "match": {"type": "result"},
+      "map": {"input_tokens": "usage.input_tokens",
+              "output_tokens": "usage.output_tokens",
+              "cache_read_tokens": "usage.cache_read_input_tokens",
+              "cache_write_tokens": "usage.cache_creation_input_tokens"},
+      "cost_usd": "total_cost_usd"
+    },
+    "verified": "installed at ~/.npm-global/bin/claude. `claude -p --permission-mode acceptEdits --output-format json \"reply with the single word OK\"` CONFIRMED: exit 0, ONE line of stdout, an envelope with type=result, result=\"OK\", usage.input_tokens=2, usage.output_tokens=4, usage.cache_read_input_tokens=15989, usage.cache_creation_input_tokens=13486, total_cost_usd=0.1429645. The envelope being one line is why the scanner needs no separate whole-file mode. Also CONFIRMED through the full path \u2014 a one-task plan dispatched by `smokin run` returned terminal=ok, claim=done, `result` as PROSE (not the envelope), and usage={input_tokens:8, output_tokens:491, cache_read_tokens:107771, cache_write_tokens:15423, cost_usd:0.2204305} on both the receipt and the ledger.",
+    "note": "`judge` is deliberately NOT given --output-format json. The delegation node reads that command's stdout as prose and nothing in this change asked it to stop; changing a row nobody measured would be a preference, not a fix. A per-pane --settings accelerant is still NOT shipped: whether it merges or replaces is untested, and if it replaces it would silently disable herdr\u2019s own state hook and Grillin\u2019s awareness hooks. Open question Q3."
   },
 
   "codewhale": {
-    "headless": "codewhale exec --json --auto",
+    "headless": "codewhale exec --auto --output-format stream-json",
     "pane": "codewhale -C {WT} --skip-onboarding",
     "holds_credentials": true,
     "global_config": "~/.codewhale/config.toml",
     "hook_scope": "global-only",
-    "fixed_port": 7891,
-    "verified": "headless CONFIRMED returns {\"mode\":\"one-shot\",\"success\":true,...}; pane emission CONFIRMED by experiment Q1 — the wrapper trap fires on pane close with rc=129",
-    "note": "Not one of herdr's 21 agent kinds, so herdr cannot classify its lifecycle. Under Smokin that costs nothing: the tick never asks herdr what any agent is doing. Its global-only hooks must never carry a task id — a hook is machine-wide and would fire for every pane."
+    "result_from": {"select": "join", "match": {"type": "content"}, "path": "content"},
+    "usage": {
+      "select": "last",
+      "match": {"type": "metadata"},
+      "map": {"input_tokens": "meta.prompt_cache_miss_tokens",
+              "output_tokens": "meta.output_tokens",
+              "cache_read_tokens": "meta.prompt_cache_hit_tokens",
+              "reasoning_tokens": "meta.reasoning_tokens"}
+    },
+    "verified": "`codewhale exec --auto --output-format stream-json \"reply with the single word OK\"` CONFIRMED: exit 0, four NDJSON line types \u2014 content, session_capture, metadata, done \u2014 with meta.input_tokens=15315, meta.prompt_cache_hit_tokens=1792, meta.prompt_cache_miss_tokens=13523, meta.output_tokens=39, meta.reasoning_tokens=37, and NO cost field anywhere in the envelope. A second run (\"count from one to twenty\") CONFIRMED that `content` events are STREAMED TOKEN CHUNKS \u2014 \u2018ele\u2019 then \u2018ven\u2019 \u2014 which is why result_from joins them and does not take the last. Pane emission CONFIRMED separately by experiment Q1: the wrapper trap fires on pane close with rc=129.",
+    "note": "The declared `--json` summary was dropped because it carries no token field at all \u2014 a dead end confirmed twice, once with real tool use. It also means DESIGN \u00a73f\u2019s \u2018Codewhale\u2019s exec --json .output\u2019 is no longer where `result` comes from; the joined content stream is. NO cost_usd key is declared here, and that is the point: codewhale reports tokens and nothing else, this repository has no price table, and inventing one to fill a column is the unearned assertion CONTRIBUTING refuses. `input_tokens` maps to prompt_cache_miss_tokens, NOT to meta.input_tokens \u2014 codewhale\u2019s input_tokens is the TOTAL including cache hits (15315 = 1792 + 13523), whereas claude\u2019s excludes them, and mapping the two onto one name would silently compare unlike things. Under the mapping used here, total input = input_tokens + cache_read_tokens + cache_write_tokens on every runtime that reports the parts. Not one of herdr\u2019s 21 agent kinds, so herdr cannot classify its lifecycle. Under Smokin that costs nothing: the tick never asks herdr what any agent is doing. Its global-only hooks must never carry a task id \u2014 a hook is machine-wide and would fire for every pane."
   },
 
   "opencode": {
-    "headless": "opencode run",
+    "headless": "opencode run --format json",
     "pane": "opencode",
     "holds_credentials": false,
     "hook_scope": "none-known",
-    "verified": "installed at ~/.opencode/bin/opencode; headless flag SUSPECTED, not exercised",
-    "note": "Its SSE event stream needs a resident subscriber, which is the one thing this design refuses to depend on. Wrapper + reaper only."
+    "result_from": {"select": "last", "match": {"type": "text"}, "path": "part.text"},
+    "usage": {
+      "select": "sum",
+      "match": {"type": "step_finish"},
+      "map": {"input_tokens": "part.tokens.input",
+              "output_tokens": "part.tokens.output",
+              "cache_read_tokens": "part.tokens.cache.read",
+              "cache_write_tokens": "part.tokens.cache.write",
+              "reasoning_tokens": "part.tokens.reasoning"},
+      "cost_usd": "part.cost"
+    },
+    "verified": "`opencode run --format json \"reply with the single word OK\"` CONFIRMED: exit 0, NDJSON on stdout with step_start / text / step_finish, part.tokens={total:8499,input:8497,output:2,reasoning:0,cache:{write:0,read:0}} and part.cost=0.003697935. A second run (\"count from one to twenty\") CONFIRMED that a `text` part arrives WHOLE \u2014 one event, 131 chars \u2014 not in chunks, which is why result_from takes the last and does not join. First invocation took over two minutes to print anything; that is server start-up, not a hang, and it matters because a budget under ~180s will reap this runtime before it speaks.",
+    "note": "usage select is `sum`, not `last`: step_finish is emitted PER STEP, so a run with tool use reports several and the run total is their sum. claude and codewhale are `last` because their envelope already totals the run, and summing a repeated total would double it. Its SSE event stream needs a resident subscriber, which is the one thing this design refuses to depend on. Wrapper + reaper only."
   },
 
   "codex": {
