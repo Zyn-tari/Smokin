@@ -296,6 +296,16 @@ class Task:
         # inside one task, and guessing at job titles is what Grillin already
         # proved does not work.
         self.human = is_human_owned(t)
+        # BLOCKED ON AN ANSWER, WHICH IS NOT THE SAME AS BLOCKED ON A PERSON.
+        # A worker that hits a decision it may not make writes QUESTIONS.md and
+        # stops. Somebody answers by putting ANSWER.md beside it. The ANSWER file
+        # existing is the whole signal — no parsing a human's edit, no marker
+        # they have to remember, and the question survives verbatim next to the
+        # answer for whoever reads the plan later.
+        self.question = ((tid / "QUESTIONS.md").is_file()
+                         and not (tid / "ANSWER.md").is_file())
+        self.answered = ((tid / "QUESTIONS.md").is_file()
+                         and (tid / "ANSWER.md").is_file())
         self.type = field(RE_TYPE, t).upper()
         self.interrupt = field(RE_INTERRUPT, t, "no").lower().startswith("y")
         self.watch = field(RE_WATCH, t, "no").lower().startswith("y")
@@ -1541,7 +1551,10 @@ def plan_pulse(plan: Plan):
     td = plan.root / "tasks"
     if td.is_dir():
         for d in sorted(td.iterdir()):
-            for name in ("RECEIPT.json", "VERDICT.json", "TASK.md"):
+            # ANSWER.md is in this list for the same reason RECEIPT.json is:
+            # it is a thing arriving from outside that the plan can move on.
+            for name in ("RECEIPT.json", "VERDICT.json", "TASK.md",
+                         "QUESTIONS.md", "ANSWER.md"):
                 f = d / name
                 try:
                     marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
@@ -1669,7 +1682,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
                               json.loads(f.read_text())["task"] / "RECEIPT.json").is_file()) \
         if (plan.priv / "dispatch").is_dir() else 0
 
-    dispatched, queued, awaiting = [], [], []
+    dispatched, queued, awaiting, asked = [], [], [], []
     for tid in plan.frontier():
         t = plan.tasks[tid]
         decision, _ = t.route()
@@ -1680,6 +1693,15 @@ def tick(plan: Plan, dry=False, close_panes=False):
         # when nothing is in flight and the only work left is somebody's to do.
         # Status is deliberately NOT touched: a person has not started merely
         # because a tick noticed them.
+        # AN OPEN QUESTION PARKS THE TASK, AND ONLY THE TASK. Same rule as a
+        # person's task and for the same reason — the branch stops, the plan
+        # does not. Re-dispatching a task that is waiting on a decision would
+        # spend a model to be told the same thing again.
+        if t.question:
+            asked.append(tid)
+            ledger(plan, event="awaiting-answer", task=tid,
+                   why="QUESTIONS.md is open and no ANSWER.md sits beside it")
+            continue
         if decision == "human":
             awaiting.append(tid)
             ledger(plan, event="awaiting-human", task=tid, owner=t.owner,
@@ -1758,6 +1780,8 @@ def tick(plan: Plan, dry=False, close_panes=False):
         print(f"  queued   {tid}  ({why})")
     for tid in awaiting:
         print(f"  awaiting {tid}  a person owns this — {plan.tasks[tid].owner or 'owner unnamed'}")
+    for tid in asked:
+        print(f"  asked    {tid}  waiting on an answer — tasks/{tid}/QUESTIONS.md")
 
     inflight = st["counts"]["running"] + st["counts"]["claimed"] + st["counts"]["judging"]
     complete = st["counts"]["verified"] == len(plan.tasks) and plan.tasks
@@ -1765,10 +1789,15 @@ def tick(plan: Plan, dry=False, close_panes=False):
     # somebody can act, and it is not this program. Reading the two as one state
     # is what would make an operator go looking for a broken plan when the plan
     # is fine and waiting for them.
-    ready_not_human = [tid for tid in st["frontier"] if tid not in awaiting]
-    stuck = inflight == 0 and not st["frontier"]
-    waiting_on_people = (inflight == 0 and not ready_not_human and bool(awaiting)
-                         and not complete)
+    parked = set(awaiting) | set(asked)
+    ready_not_human = [tid for tid in st["frontier"] if tid not in parked]
+    # An open question is not STUCK either. Stuck means nobody can act; here
+    # somebody can, and the plan is holding the branch open for them.
+    open_questions = [tid for tid in plan.tasks
+                      if plan.tasks[tid].question and plan.state(tid) != "verified"]
+    stuck = inflight == 0 and not st["frontier"] and not open_questions
+    waiting_on_people = (inflight == 0 and not ready_not_human
+                         and bool(parked or open_questions) and not complete)
 
     # THE CLOSING READING. The check at the top of a tick is the "after" for the
     # tick before it — but a plan that completes or gets stuck never gets a next
@@ -1798,11 +1827,17 @@ def tick(plan: Plan, dry=False, close_panes=False):
         # wrong, nothing is broken, and there is nothing this program can do
         # next. Naming it separately is what lets `run` stop cleanly instead of
         # spinning against work no runtime is allowed to take.
-        who = ", ".join(f"{tid} ({plan.tasks[tid].owner or 'owner unnamed'})"
-                        for tid in awaiting)
-        print(f"\nnothing in flight — WAITING ON A PERSON: {who}")
-        print("Everything a runtime could take has been taken. Do the task(s) above,")
-        print("set the status, and tick again — `smokin run` resumes from disk.")
+        bits = [f"{tid} ({plan.tasks[tid].owner or 'owner unnamed'})" for tid in awaiting]
+        bits += [f"{tid} asks — tasks/{tid}/QUESTIONS.md" for tid in
+                 sorted(set(asked) | set(open_questions))]
+        print(f"\nnothing in flight — WAITING ON A PERSON: {', '.join(bits)}")
+        print("Everything a runtime could take has been taken.")
+        if asked or open_questions:
+            print("Answer by writing ANSWER.md beside the question. `smokin run` is")
+            print("watching for it and carries on by itself when it lands.")
+        else:
+            print("Do the task(s) above and set the status; `smokin run` is watching")
+            print("the plan directory and carries on by itself.")
         return 5
     print(f"\n{inflight} in flight · see PROGRESS.md")
     return 1
@@ -2461,6 +2496,9 @@ def main():
                     help=f"run: longest a single wait between ticks may block "
                          f"(default {MAX_WAIT_S:g}s). A tick must still happen on "
                          f"its own to reap work whose worker died silently")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="run: exit 5 when a person is needed instead of holding "
+                         "for them. For cron and CI, where nobody is coming")
     ap.add_argument("--max-ticks", type=int, default=200)
     ap.add_argument("--interval", type=float, default=3.0)
     ap.add_argument("--version", action="version",
@@ -2530,6 +2568,7 @@ def main():
     if a.cmd == "tick":
         return tick(plan, a.dry_run, a.close)
     if a.cmd == "run":
+        waited = False
         # THE LOOP STOPS ON EVERY TERMINAL READING, and 4 was missing from that
         # list. A halt is the tick saying a machine is broken and refusing to add
         # work on top of it — and `run` was sleeping three seconds and asking
@@ -2539,6 +2578,36 @@ def main():
         #   5  waiting on a person            1  in flight, keep going
         for i in range(a.max_ticks):
             rc = tick(plan, a.dry_run, a.close)
+            # 5 IS NOT A REASON TO STOP. A person is not a failure and not the
+            # end of the work — they are the answer to a question the plan could
+            # not settle by itself. Exiting here made the operator the scheduler:
+            # they had to notice, act, and remember to re-run. So the loop holds
+            # the branch open and keeps watching the plan directory; the moment
+            # an ANSWER.md lands, or a status moves, the next tick picks it up
+            # and carries on. `--no-wait` restores the old behaviour for a cron
+            # job or a CI step, where nobody is coming.
+            if rc == 5 and not a.no_wait:
+                if not waited:
+                    print("\nholding — this loop does not end because a person is "
+                          "needed. Answer when you are back; it continues by itself.")
+                    waited = True
+                # ONLY RE-TICK WHEN THE PLAN ACTUALLY MOVED. A wait that
+                # times out means nothing changed, and ticking again would
+                # reprint the whole "waiting on a person" banner every few
+                # seconds for as long as somebody is away — turning a held
+                # branch into log spam that buries the one line they need to
+                # read. Nothing is in flight in this state by definition, so
+                # there is no worker to reap and nothing a bare tick would
+                # learn. A halt is the exception: it outranks the wait.
+                while True:
+                    w = wait(plan, timeout=(a.max_wait or MAX_WAIT_S),
+                             poll=max(a.interval, 0.05), quiet=True)
+                    if w == 4:
+                        return tick(plan, a.dry_run, a.close)
+                    if w == 0:
+                        break
+                plan = Plan(root)
+                continue
             if rc != 1:
                 return rc
             # WATCH, DO NOT NAP. A fixed sleep is both too slow (a task that
