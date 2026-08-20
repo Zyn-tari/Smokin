@@ -26,6 +26,44 @@ config — which is the designed behaviour, and still not a thing you want mid-j
 
 ## Unreleased
 
+### Running to a stop — 2026-08-20
+
+**The evidence was two case studies of a real repository** — five plans, 38 tasks, grillin
+installed as a `pre-commit` hook. They used `smokin verify` and never once ran the dispatch
+half, while the gate's own PASS text advertises it: *"`smokin tick` enforces it where it
+can."* Asking why found two defects and a shipped CLI bug.
+
+- **A task a person owns was dispatched to a model.** `route()` had no human clause, so a
+  task whose `**Owner:**` is a person went to a runtime like every other. Grillin has decided
+  who counts as a person since v1.0.0 and Smokin never asked. Now it does, using Grillin's
+  `is_human_owned` **character for character** — patterns and behaviour both asserted against
+  the live file, because `RE_READER` diverged in exactly this way and an adversary found it,
+  not a test. `**Workers:** human` in PLAN.md widens it to a plan of people with job titles.
+- **Such a task is PARKED, not blocking.** The BPMN reading: a token on a user task blocks its
+  own branch, not the process. The tick carries on with every other ready task; the plan comes
+  to rest only when the only work left is somebody's. Status is deliberately untouched — a
+  tick noticing you is not you starting. New exit code **5, waiting on a person**, distinct
+  from `3` stuck because nothing is wrong and the operator's next move is different.
+- **`smokin run` looped on a halt.** It stopped on `0` and `3` and slept on everything else,
+  so a tier-1 invariant breach — the tick refusing to add work on top of a broken machine —
+  was re-asked every three seconds up to 200 times. Mutation-proven: reverting the loop
+  re-ticks a halted plan 5 of 5 times.
+- **`smokin tick --close <plan>` did not work, and never had.** `parse_args` takes positionals
+  in contiguous chunks, so the path arrived after a flag as an *unrecognized argument* and the
+  command exited 2 without ticking. Every usage line in the file that shows a flag puts it
+  before the plan. Now `parse_intermixed_args`. Present since v1.0.0.
+- **`smokin wait [--task T]`** — the curator's primitive, which operators were writing per
+  site as a `wait-for-agent.sh` and backgrounding one shell per agent. Waiting on a worker is
+  *execution*, so under the boundary rule it is Smokin's to answer and Grillin's only to point
+  at. It blocks until the task settles and returns on the **event**, not the clock; `5` at
+  once for a person's task, `4` if the plan halts under it, `3` on timeout. `run` now watches
+  the plan through the same primitive instead of a blind sleep — **capped**, because a worker
+  that dies without emitting moves no file, and the tick that reaps it on budget must still
+  happen. That cap is a regression check: an uncapped wait turned `run` into a hang for one
+  revision during this work.
+
+`bash tests/run-tests.sh` — 35 checks (was 34); `tests/test-continuity.py` adds 77.
+
 **Token capture at dispatch.** The receipt gains an optional `usage` key carrying what the
 runtime itself reported: tokens always, cost only from a runtime that reports one.
 

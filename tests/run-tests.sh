@@ -272,6 +272,20 @@ else
   cat "$LAB/memory.out"
 fi
 
+# CONTINUITY. Two case studies of a real repository used `smokin verify` and
+# never once ran the dispatch half — so this asks the question those studies
+# could not: can an operator start it and walk away. It is also the only harness
+# here that reads GRILLIN's source, because who counts as a person is Grillin's
+# decision and two definitions would eventually disagree.
+echo
+if python3 "$ROOT/tests/test-continuity.py" > "$LAB/continuity.out" 2>&1; then
+  n=$(count_pass "$LAB/continuity.out")
+  ok "continuity: $n checks on running to a stop"
+else
+  bad "continuity" "see below"
+  cat "$LAB/continuity.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

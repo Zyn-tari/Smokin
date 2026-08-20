@@ -5,7 +5,8 @@ smokin — an idempotent tick that dispatches a Grillin plan from disk.
     smokin doctor            probe the machine, write .smokin/doctor.json
     smokin verify            run every task's own done-command. Starts nothing
     smokin tick              one pass: reap, gate, judge, dispatch, render
-    smokin run               tick until the plan is finished or stuck
+    smokin run               tick until there is nothing a runtime may do next
+    smokin wait [--task T]   block until the plan moves, or until T settles
     smokin status            print the frontier
     smokin present           re-render PROGRESS.md from STATUS.json
     smokin reap [--close]    force-reap overdue tasks (--close closes the tabs of
@@ -45,6 +46,22 @@ measures BLAST RADIUS — what a task broke on its way to passing its own gate.
 before the first dispatch of a run, re-checked at every tick boundary and by
 `smokin verify`. A break is a halt with the command, the expected reading and
 the actual one. See smokin_invariants.py for the two incidents that produced it.
+
+AND IT RUNS UNTIL SOMEBODY HAS TO. `smokin run` ticks until the work stops being
+Smokin's to do, and every way that can happen is a separate exit code, because an
+operator's next action is different in each case:
+
+    0  complete             every task verified
+    1  in flight            (only from a bare `tick`; `run` keeps going)
+    3  stuck                nothing running and nothing ready. Something is wrong
+    4  halted               an invariant broke or a ruling said stop. Read it
+    5  waiting on a person  a task is owned by a human, and everything a runtime
+                            could take has been taken. Nothing is wrong
+
+A task whose owner is a person is never dispatched — Grillin's `is_human_owned`
+decides that, and this file uses Grillin's own patterns so the two cannot drift.
+It is PARKED, not blocked: the tick carries on with every other ready task and
+only comes to rest when the only work left belongs to somebody.
 
 Zero dependencies (python3 stdlib). Fail-closed.
 """
@@ -139,6 +156,71 @@ RE_READER = re.compile(r"^\*\*Reader:\*\*\s*([a-z]+)", re.M | re.I)
 # same degradation the common case already takes, since 11 of 20 shipped
 # TASK.md declare no `**Agent:**` at all.
 RE_AGENT_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+
+# WHO IS A PERSON — AND THE ANSWER IS GRILLIN'S, NOT OURS. Grillin's gate already
+# decides this (`is_human_owned` in scripts/validate-plan.py) because two of its
+# checks pull in opposite directions on the answer: declaring `human` REMOVES the
+# model floor and ADDS the frozen-contract obligation. Smokin needs the same
+# answer for a third reason — a task a person owns must never be handed to a
+# runtime. Three definitions would eventually disagree, and the failure mode is a
+# model quietly doing a person's work while the plan reports progress. So these
+# are Grillin's patterns character for character, and a contract test asserts
+# that against the live file rather than trusting this comment. The same lesson
+# as RE_READER, which diverged exactly this way and was caught by an adversary.
+RE_OWNER_LINE = re.compile(r"^\*\*Owner\b[^:]*:\*\*\s*([^·\n]+?)\s*(?=\*\*|·|$)", re.M | re.I)
+RE_AGENT_LINE = re.compile(r"^\*\*Agent\b[^:]*:\*\*\s*`?([^`·\n]+?)`?\s*(?=\*\*|·|$)", re.M | re.I)
+RE_MODEL = re.compile(r"\*\*Model:\*\*\s*`?([^`·\n]+?)`?\s*(?=\*\*|·|$)", re.M | re.I)
+RE_PERSONA = re.compile(r"\*\*(?:Agent|Persona):\*\*\s*`?([^`·\n]+?)`?\s*(?=\*\*|·|$)", re.M | re.I)
+RE_WORKERS = re.compile(r"^\*\*Workers:\*\*\s*(.+)$", re.M | re.I)
+
+# The ceiling on a single wait inside `run`. Not a poll interval — the waiter
+# returns the instant a file moves — but the longest it may go WITHOUT ticking,
+# because reaping a worker that died without emitting is something only a tick
+# does and no file movement will ever announce.
+MAX_WAIT_S = 30.0
+
+
+def owner_of(text: str) -> str:
+    """Who is accountable for this task. Empty string when nobody is named.
+
+    Owner wins wherever it appears; Agent is a fallback only because the template
+    shipped for a long time with no Owner line.
+    """
+    m = RE_OWNER_LINE.search(text) or RE_AGENT_LINE.search(text)
+    return m.group(1).strip() if m else ""
+
+
+def is_human_owned(text: str) -> bool:
+    """Is this task owned by a person rather than an agent? Grillin's definition."""
+    own = owner_of(text)
+    if not own:
+        return False
+    # `human` is an EXPLICIT declaration and outranks everything, including a
+    # model line. Checking the persona/model lines first suppresses the explicit
+    # case — Grillin shipped that bug once and its mutation probe caught it.
+    if re.search(r"\bhuman\b", own, re.I):
+        return True
+    # `you` and `requester` are idiom, not declaration: the shipped examples say
+    # `**Owner:** you` while naming a persona and a model, and there it means
+    # "you are driving this plan", not "a person executes this task".
+    if RE_PERSONA.search(text) or RE_MODEL.search(text):
+        return False
+    return bool(re.search(r"\byou\b|\brequester\b", own, re.I))
+
+
+def human_worked_plan(root) -> bool:
+    """Does PLAN.md declare that the workers are people?
+
+    The per-task test only fires on the literal words human/you/requester. Real
+    plans of people write "Writer A", "the DBA" — no regex over job titles closes
+    that, so the answer is declared once in PLAN.md and read, not guessed.
+    """
+    f = root / "PLAN.md"
+    if not f.is_file():
+        return False
+    mw = RE_WORKERS.search(f.read_text(errors="replace"))
+    return bool(mw and re.search(r"\bhumans?\b|\bpeople\b|\bpersons?\b",
+                                 mw.group(1), re.I))
 RE_TASK_ID = re.compile(r"\b([A-Z]\d{1,3}[a-z]?)\b")
 RE_FENCE = re.compile(r"```[a-z]*\n(.*?)```", re.S)
 
@@ -209,6 +291,11 @@ class Task:
         self.agent = (self.agent_declared
                       if RE_AGENT_OK.match(self.agent_declared) else "")
         self.reader = field(RE_READER, t).strip().lower()
+        # Set from this file alone. `Plan` widens it afterwards when PLAN.md
+        # declares human workers — a plan-level declaration cannot be seen from
+        # inside one task, and guessing at job titles is what Grillin already
+        # proved does not work.
+        self.human = is_human_owned(t)
         self.type = field(RE_TYPE, t).upper()
         self.interrupt = field(RE_INTERRUPT, t, "no").lower().startswith("y")
         self.watch = field(RE_WATCH, t, "no").lower().startswith("y")
@@ -220,6 +307,12 @@ class Task:
 
     def route(self):
         """§2b, first match wins. Returns (decision, clause)."""
+        # BEFORE EVERY OTHER CLAUSE. A person's task is not a placement question
+        # — there is no runtime that can do it, and the failure this prevents is
+        # not a bad pane, it is a model silently doing work a person was
+        # accountable for while the plan reports it as progress.
+        if self.human:
+            return "human", "0 · a person owns this"
         if self.interrupt:
             return "pane", "1 · Interrupt: yes"
         if self.watch:
@@ -250,6 +343,14 @@ class Plan:
             for d in sorted(td.iterdir()):
                 if d.is_dir() and (d / "TASK.md").is_file():
                     self.tasks[d.name] = Task(d)
+            # THE PLAN-LEVEL DECLARATION, applied after the tasks exist because
+            # it cannot be seen from inside one of them. It only ever WIDENS:
+            # a task that already reads as human-owned stays so if PLAN.md says
+            # nothing, and no declaration here can turn a person's task back
+            # into an agent's.
+            if human_worked_plan(root):
+                for t in self.tasks.values():
+                    t.human = True
         elif (root / "TASK.md").is_file():
             # ONE TASK, NO PLAN AROUND IT. The precondition used to be a plan
             # directory, and that precondition was the reason `verify` went
@@ -1414,6 +1515,101 @@ def verify(plan: Plan, only=None):
 
 # ── the tick ────────────────────────────────────────────────────────────────
 
+def plan_pulse(plan: Plan):
+    """Everything a waiter could possibly be waiting FOR, as one comparable value.
+
+    Deliberately derived from files and nothing else, for the same reason the
+    tick is: there is no resident orchestrator to ask, and a waiter that held
+    state would be a second thing to crash. A receipt arriving, a verdict being
+    taken, a spooled claim landing, a halt being written, a person editing a
+    status by hand — all of them move a file, so all of them move this.
+    """
+    marks = []
+    for rel in ("spool/inbox", "dispatch"):
+        d = plan.priv / rel
+        if d.is_dir():
+            for f in sorted(d.iterdir()):
+                try:
+                    marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
+                except OSError:
+                    pass
+    for f in (plan.priv / "HALT.json", plan.root / "STATUS.json"):
+        try:
+            marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
+        except OSError:
+            pass
+    td = plan.root / "tasks"
+    if td.is_dir():
+        for d in sorted(td.iterdir()):
+            for name in ("RECEIPT.json", "VERDICT.json", "TASK.md"):
+                f = d / name
+                try:
+                    marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
+                except OSError:
+                    pass
+    return tuple(marks)
+
+
+def task_settled(plan: Plan, tid):
+    """Has this task stopped being something a waiter should keep waiting on?"""
+    st = plan.state(tid)
+    if st in ("verified", "refuted", "failed"):
+        return st
+    # A person's task never settles on its own, and a waiter that blocks on one
+    # is a waiter that never returns. Say so immediately instead.
+    t = plan.tasks.get(tid)
+    if t is not None and t.human:
+        return "human"
+    return None
+
+
+def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False):
+    """Block until there is something new to look at. Returns an exit code.
+
+    THIS IS THE CURATOR'S PRIMITIVE, and it was missing. Operators were writing
+    their own `wait-for-agent.sh` per agent and backgrounding one shell each,
+    which works and which nobody should have to write: it re-implements, per
+    site, the question `smokin` is already the authority on. The answer belongs
+    here — it is EXECUTION, so it is Smokin's, not Grillin's.
+
+    It still holds no state and starts nothing. It watches the plan directory,
+    because the plan directory is where every answer already is.
+    """
+    if tid is not None and tid not in plan.tasks:
+        print(f"smokin: no task {tid} in {plan.root} — there are: "
+              f"{', '.join(sorted(plan.tasks)) or 'none'}", file=sys.stderr)
+        return 2
+    deadline = (time.time() + timeout) if timeout else None
+    before = plan_pulse(plan)
+    while True:
+        plan.__init__(plan.root)
+        if halted(plan):
+            if not quiet:
+                print_halt(halted(plan))
+            return 4
+        if tid is not None:
+            got = task_settled(plan, tid)
+            if got == "human":
+                if not quiet:
+                    print(f"{tid} is owned by a person — it will not settle on its "
+                          f"own. Nothing to wait for.")
+                return 5
+            if got:
+                if not quiet:
+                    print(f"{tid} {got}")
+                return 0 if got == "verified" else 1
+        elif plan_pulse(plan) != before:
+            if not quiet:
+                print("the plan moved")
+            return 0
+        if deadline is not None and time.time() >= deadline:
+            if not quiet:
+                print(f"timed out after {timeout:g}s"
+                      + (f" — {tid} is {plan.state(tid)}" if tid else ""))
+            return 3
+        time.sleep(poll)
+
+
 def tick(plan: Plan, dry=False, close_panes=False):
     plan.priv.mkdir(parents=True, exist_ok=True)
     lock = open(plan.priv / "tick.lock", "w")
@@ -1473,10 +1669,22 @@ def tick(plan: Plan, dry=False, close_panes=False):
                               json.loads(f.read_text())["task"] / "RECEIPT.json").is_file()) \
         if (plan.priv / "dispatch").is_dir() else 0
 
-    dispatched, queued = [], []
+    dispatched, queued, awaiting = [], [], []
     for tid in plan.frontier():
         t = plan.tasks[tid]
         decision, _ = t.route()
+        # PARKED, NOT DISPATCHED, AND NOT A STOP. The BPMN reading is the right
+        # one: a token sitting on a user task blocks THAT branch and nothing
+        # else. So a person's task is set aside and the loop carries on with
+        # every other ready task — the plan only comes to rest further down,
+        # when nothing is in flight and the only work left is somebody's to do.
+        # Status is deliberately NOT touched: a person has not started merely
+        # because a tick noticed them.
+        if decision == "human":
+            awaiting.append(tid)
+            ledger(plan, event="awaiting-human", task=tid, owner=t.owner,
+                   why="a person owns this task; no runtime may take it")
+            continue
         # THE ADVERSARY, NOT ANY READER. This was `bool(RE_READER.search(...))`,
         # which fired on the health reader too and told an operator that a role
         # whose contamination is REQUIRED had got a clean, separate session. The
@@ -1548,10 +1756,19 @@ def tick(plan: Plan, dry=False, close_panes=False):
         print(f"  dispatch {tid}  {d}  {where}")
     for tid, why in queued:
         print(f"  queued   {tid}  ({why})")
+    for tid in awaiting:
+        print(f"  awaiting {tid}  a person owns this — {plan.tasks[tid].owner or 'owner unnamed'}")
 
     inflight = st["counts"]["running"] + st["counts"]["claimed"] + st["counts"]["judging"]
     complete = st["counts"]["verified"] == len(plan.tasks) and plan.tasks
+    # STUCK MEANS NOBODY CAN ACT. A frontier of parked human tasks is not that —
+    # somebody can act, and it is not this program. Reading the two as one state
+    # is what would make an operator go looking for a broken plan when the plan
+    # is fine and waiting for them.
+    ready_not_human = [tid for tid in st["frontier"] if tid not in awaiting]
     stuck = inflight == 0 and not st["frontier"]
+    waiting_on_people = (inflight == 0 and not ready_not_human and bool(awaiting)
+                         and not complete)
 
     # THE CLOSING READING. The check at the top of a tick is the "after" for the
     # tick before it — but a plan that completes or gets stuck never gets a next
@@ -1576,6 +1793,17 @@ def tick(plan: Plan, dry=False, close_panes=False):
     if stuck:
         print("\nnothing in flight and nothing ready — the plan is STUCK")
         return 3
+    if waiting_on_people:
+        # A DISTINCT RESULT, not a variant of stuck and not a halt. Nothing is
+        # wrong, nothing is broken, and there is nothing this program can do
+        # next. Naming it separately is what lets `run` stop cleanly instead of
+        # spinning against work no runtime is allowed to take.
+        who = ", ".join(f"{tid} ({plan.tasks[tid].owner or 'owner unnamed'})"
+                        for tid in awaiting)
+        print(f"\nnothing in flight — WAITING ON A PERSON: {who}")
+        print("Everything a runtime could take has been taken. Do the task(s) above,")
+        print("set the status, and tick again — `smokin run` resumes from disk.")
+        return 5
     print(f"\n{inflight} in flight · see PROGRESS.md")
     return 1
 
@@ -1622,8 +1850,12 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
             "blocked_by": sorted(t.blocked_by),
             "waiting_on": sorted(b for b in t.blocked_by
                                  if b in plan.tasks and plan.state(b) != "verified"),
-            "needs_human": t.interrupt or t.type == "ASK"
+            # `human` FIRST, because it is the only one of these that means the
+            # task will never be dispatched at all. The other three mean a task
+            # a runtime CAN take needs a person at some point in it.
+            "needs_human": t.human or t.interrupt or t.type == "ASK"
                            or (plan.root / "tasks" / tid / "QUESTIONS.md").is_file(),
+            "human_owned": t.human,
             "claim": r.get("claim"), "terminal": r.get("terminal"),
             "result": (r.get("result") or "").strip().splitlines()[-1:] or [""],
             "wall_s": r.get("wall_s"),
@@ -2200,7 +2432,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["doctor", "tick", "verify", "run", "status", "present",
                                     "reap", "reset", "rulings", "invariants", "resume",
-                                    "memory", "remember"])
+                                    "memory", "remember", "wait"])
     ap.add_argument("plan", nargs="?", default=".")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--close", action="store_true",
@@ -2223,11 +2455,23 @@ def main():
                          "nobody can re-run is not stored")
     ap.add_argument("--kind", default="lesson", choices=["fact", "lesson"],
                     help="remember: 'fact' (observed) or 'lesson' (generalised)")
+    ap.add_argument("--timeout", type=float, default=0.0,
+                    help="wait: give up after N seconds and exit 3. 0 = no limit")
+    ap.add_argument("--max-wait", type=float, default=0.0,
+                    help=f"run: longest a single wait between ticks may block "
+                         f"(default {MAX_WAIT_S:g}s). A tick must still happen on "
+                         f"its own to reap work whose worker died silently")
     ap.add_argument("--max-ticks", type=int, default=200)
     ap.add_argument("--interval", type=float, default=3.0)
     ap.add_argument("--version", action="version",
                     version=f"smokin {__version__} ({_ver()})")
-    a = ap.parse_args()
+    # INTERMIXED, because `smokin tick --close myplan` is a documented form and
+    # plain `parse_args` REFUSED it: argparse takes positionals in contiguous
+    # chunks, so `tick` filled `cmd`, `plan` defaulted to `.` unseen, and the
+    # real path arrived after a flag as an "unrecognized argument". Every usage
+    # line in this file that shows a flag puts it before the plan. Found by the
+    # continuity tests, present since v1.0.0.
+    a = ap.parse_intermixed_args()
 
     root = Path(a.plan).resolve()
     # `smokin verify path/to/TASK.md` — point it straight at the file. The task
@@ -2279,16 +2523,36 @@ def main():
             print(f"{c.get('verified',0)}/{st['total']} verified · "
                   f"frontier: {', '.join(st['frontier']) or '—'}")
         return 0
+    if a.cmd == "wait":
+        return wait(plan, a.task, a.timeout, max(a.interval, 0.05))
     if a.cmd == "verify":
         return verify(plan, a.task)
     if a.cmd == "tick":
         return tick(plan, a.dry_run, a.close)
     if a.cmd == "run":
+        # THE LOOP STOPS ON EVERY TERMINAL READING, and 4 was missing from that
+        # list. A halt is the tick saying a machine is broken and refusing to add
+        # work on top of it — and `run` was sleeping three seconds and asking
+        # again, forever, which is the exact opposite of what a halt is for. It
+        # would have re-ticked a tier-1 invariant breach 200 times.
+        #   0  complete      3  stuck         4  halted
+        #   5  waiting on a person            1  in flight, keep going
         for i in range(a.max_ticks):
             rc = tick(plan, a.dry_run, a.close)
-            if rc in (0, 3):
+            if rc != 1:
                 return rc
-            time.sleep(a.interval)
+            # WATCH, DO NOT NAP. A fixed sleep is both too slow (a task that
+            # finished in the first 200ms waits out the rest of the interval)
+            # and too fast (a long task is re-ticked hundreds of times for
+            # nothing). `wait` returns the moment a file moves, and `--interval`
+            # becomes the poll granularity it uses rather than a blind delay.
+            # CAPPED, ALWAYS. A wait with no ceiling turns `run` into something
+            # that can block forever: a worker that dies without emitting moves
+            # no file, so nothing wakes the waiter, and the tick that would have
+            # REAPED it on budget never happens. The wait is an optimisation over
+            # the old blind sleep, never a gate on the loop.
+            wait(plan, timeout=(a.max_wait or MAX_WAIT_S),
+                 poll=max(a.interval, 0.05), quiet=True)
             plan = Plan(root)
         print("max ticks reached")
         return 1

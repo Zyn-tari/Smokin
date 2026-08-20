@@ -177,7 +177,7 @@ export PATH="$PWD/smokin/bin:$PATH"
 
 smokin verify examples/demo-plan     # check a plan without starting anything
 smokin doctor examples/demo-plan     # what is actually installed on this machine
-smokin run    examples/demo-plan     # the fleet: tick until complete or stuck
+smokin run    examples/demo-plan     # the fleet: run it until it is somebody else's turn
 cat           examples/demo-plan/PROGRESS.md
 ```
 
@@ -198,7 +198,8 @@ verdict  T3  REFUTED
 | `smokin verify <plan>` | **start here.** Re-run every task's own done-command. Starts nothing, edits no `TASK.md`, spends no model calls |
 | `smokin doctor <plan>` | probe every declared runtime, the filesystem and the shell; write `.smokin/doctor.json` |
 | `smokin tick <plan>` | one pass: reap · gate · **judge** · dispatch · render. **Safe to run at any time, from anywhere** |
-| `smokin run <plan>` | tick until the plan is complete or stuck |
+| `smokin run <plan>` | tick until there is nothing a runtime may do next. Start it and walk away |
+| `smokin wait <plan> --task T1` | block until `T1` settles. What operators were writing a `wait-for-agent.sh` for |
 | `smokin status <plan>` | one line: how many verified, what is ready |
 | `smokin present <plan>` | print `PROGRESS.md` |
 | `smokin reap <plan> [--close]` | force-reap overdue tasks; `--close` also tidies the pane |
@@ -246,6 +247,41 @@ probe is trusted to be read-only and nothing verifies that; and an unchanged rea
 [`templates/_INVARIANTS.toml.template`](templates/_INVARIANTS.toml.template).
 
 ---
+
+## It runs until it is somebody else's turn
+
+`smokin run` ticks until the work stops being Smokin's to do. Every way that can happen is a
+separate exit code, because your next move is different in each:
+
+| | | |
+|---|---|---|
+| `0` | complete | every task verified |
+| `3` | stuck | nothing running, nothing ready. Something is wrong |
+| `4` | halted | an invariant broke, or a ruling said stop. Read it |
+| `5` | waiting on a person | a task is owned by a human. **Nothing is wrong** |
+
+**A task a person owns is never handed to a model.** Grillin already decides who counts as a
+person — `**Owner:** human`, or `**Workers:** human` in PLAN.md for a plan of people with job
+titles — and Smokin uses Grillin's own definition so the two cannot drift.
+
+Such a task is **parked, not blocking**. The tick carries on dispatching every other ready
+task and only comes to rest when the *only* work left is somebody's to do. That is the BPMN
+user-task reading: a token on a human task blocks its own branch, not the process.
+
+```
+  dispatch T2  inproc  pid 41062
+  awaiting T4  a person owns this — human
+
+nothing in flight — WAITING ON A PERSON: T4 (human)
+Everything a runtime could take has been taken. Do the task(s) above,
+set the status, and tick again — `smokin run` resumes from disk.
+```
+
+And when you want to block on one task rather than drive the whole plan — a curator waiting
+on a worker — that is `smokin wait <plan> --task T4`. It returns the moment the task settles,
+`5` immediately if the task is a person's (it will never settle on its own), `4` if the plan
+halts under it, and `3` on `--timeout`. It holds no state and starts nothing, like everything
+else here.
 
 ## When you need the fleet — how `tick` works
 
