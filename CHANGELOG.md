@@ -24,7 +24,20 @@ config — which is the designed behaviour, and still not a thing you want mid-j
 
 ---
 
-## Unreleased
+## v1.1.0 — 2026-08-20
+
+**One new exit code, and it is not an error.** `smokin run` now exits **5** when a task is
+owned by a person and everything a runtime could take has been taken. A caller that treats
+any non-zero as failure will read it as one; nothing is wrong, and the plan is waiting for
+you. `0` complete · `3` stuck · `4` halted · `5` waiting on a person.
+
+**A task a person owns is no longer dispatched to a model at all** — Grillin's
+`is_human_owned` decides that, copied character for character and contract-tested against the
+live file.
+
+New subcommand: `smokin wait [--task T]`. Also: `smokin tick --close <plan>` works for the
+first time (it exited 2 without ticking in v1.0.0), and `smokin run` no longer loops on a
+halt.
 
 ### Running to a stop — 2026-08-20
 
