@@ -1350,3 +1350,48 @@ templates/smokin*.template         NEW (6 files)
 ```
 
 Every one of those is an edit somebody else authorises. This document authorises none of them.
+
+---
+
+## §2i · Running to a stop, and who is allowed to stop it
+
+`smokin run` exists so an operator can start the fleet and walk away. That only means
+something if the loop stops for the right reasons and does not stop for the wrong ones, so
+every terminal reading is a separate exit code: `0` complete, `3` stuck, `4` halted, `5`
+waiting on a person. `1` — in flight — is the only one that continues the loop.
+
+**A person's task is never dispatched.** Who counts as a person is *Grillin's* decision, not
+ours: its gate has needed the answer since v1.0.0 because two of its checks pull in opposite
+directions on it (declaring `human` removes the model floor and adds the frozen-contract
+obligation). Smokin needs the same answer for a third reason — no runtime may take the work —
+and three definitions would eventually disagree. The failure that would produce is a model
+quietly doing a person's task while the plan reports progress, which is worse than any
+refusal. So the patterns here are Grillin's, copied character for character, and a contract
+test asserts that against the live file rather than against this paragraph. `RE_READER` was
+allowed to drift exactly this way and an adversary found it, not a test.
+
+**Parked, not blocking.** The shape is borrowed from BPMN's user task, where a token sitting
+on human work blocks its own branch and the process instance comes to rest only when no token
+can advance. So the tick sets the task aside, ledgers `awaiting-human`, and carries on
+dispatching everything else ready. The status is deliberately left alone: a tick noticing you
+is not you starting. The silent control in the test file is the load-bearing one — a sibling
+agent task in the same plan and the same tick must still go out, or "continuous" is a word
+with nothing behind it.
+
+**`wait` is the curator's primitive and it is ours to own.** Operators were writing
+`wait-for-agent.sh` per site and backgrounding one shell per agent, re-implementing the
+question this tool is already the authority on. Waiting on a worker is execution, so the
+boundary rule puts the mechanism here and leaves Grillin only a pointer. It holds no state
+and starts nothing — it watches the plan directory, because the plan directory is where every
+answer already is.
+
+### The limits of this layer
+
+- **`--max-wait` is a ceiling, not a poll interval.** A worker that dies without emitting
+  moves no file, so nothing wakes a waiter, and the tick that would reap it on budget never
+  happens. An uncapped wait turned `run` into a hang for one revision while this was written.
+  The wait is an optimisation over a blind sleep; it is never a gate on the loop.
+- **Exit `5` says a person is needed, not that they were told.** Nothing here notifies anybody.
+- **A plan of people with job titles needs the PLAN.md declaration.** No regex over "Writer A"
+  or "the DBA" is ever going to close that, which is why Grillin put the declaration where the
+  question is actually asked, and why this reads the declaration instead of guessing.
