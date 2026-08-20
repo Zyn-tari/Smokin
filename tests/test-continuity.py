@@ -237,7 +237,8 @@ r = run_cli(["tick"], p)
 chk("a plan whose only ready work is a person's exits 5", r.returncode, 5)
 has("...and says so in words", r.stdout, "WAITING ON A PERSON")
 has("...naming the task and its owner", r.stdout, "T1 (human)")
-has("...and says what to do next", r.stdout, "tick again")
+has("...and says what to do next — and it is no longer 'run it again'",
+    r.stdout, "carries on by itself")
 hasnt("...and does NOT call it stuck", r.stdout, "STUCK")
 
 # SILENT CONTROL 1: a genuinely stuck plan still reports 3.
@@ -297,9 +298,16 @@ chk("...and ticks exactly ONCE, not max-ticks times",
     r.stdout.count("HALTED — tier"), 1)
 hasnt("...and never reports running out of ticks", r.stdout, "max ticks reached")
 
+# CONTRACT CHANGED DELIBERATELY, and this is the check that used to assert the
+# old one. `run` no longer EXITS on a person — it holds the branch open and waits,
+# because exiting made the operator the scheduler. The exit is now opt-in, for a
+# cron job or a CI step where nobody is coming. Left here rather than deleted: a
+# reader of this file should be able to see that the stop was traded away on
+# purpose, not lost.
 p = mkplan("runwait", [dict(tid="T1", owner="human")])
-r = run_cli(["run", "--max-ticks", "5", "--interval", "0"], p)
-chk("`run` stops on a person rather than spinning against them", r.returncode, 5)
+r = run_cli(["run", "--no-wait", "--max-ticks", "5", "--interval", "0"], p)
+chk("`run --no-wait` stops on a person rather than spinning against them",
+    r.returncode, 5)
 chk("...having ticked once", r.stdout.count("WAITING ON A PERSON"), 1)
 
 # SILENT CONTROL: `run` still LOOPS on the one code that means keep going. Three
@@ -382,6 +390,72 @@ try:
     chk("...bounded by --max-wait, not by luck", time.time() - t0 < 55, True)
 except subprocess.TimeoutExpired:
     chk("`run` returns even when nothing on disk ever moves", False, True)
+
+
+print("\n=== 7c · a question parks its branch; the loop does NOT end on a person ===")
+# THE RESHAPE. A person is not a worker with a task — they are the answer to a
+# question the plan could not settle. So the loop must never TERMINATE on one:
+# exiting made the operator the scheduler, who had to notice, act, and remember
+# to re-run. It holds the branch open, keeps watching the plan directory, and
+# carries on by itself the moment an answer lands.
+p = mkplan("asked", [dict(tid="T1", owner="worker-a", agent="impl"),
+                     dict(tid="T2", owner="worker-b", agent="impl")])
+(p / "tasks" / "T1" / "QUESTIONS.md").write_text("# blocked\n\nBack off how?\n")
+r = run_cli(["tick"], p)
+has("a task with an open question is reported as asked", r.stdout, "asked    T1")
+has("...pointing at the question itself", r.stdout, "tasks/T1/QUESTIONS.md")
+hasnt("...and is NOT dispatched", r.stdout, "dispatch T1")
+chk("...and its status is untouched", S.Plan(p).tasks["T1"].status, "NOT STARTED")
+chk("...and the ledger says why",
+    [e.get("task") for e in ledger_events(p, "awaiting-answer")], ["T1"])
+# THE CONTROL THAT CARRIES THE CLAIM: the branch stopped, the plan did not.
+has("the sibling task went out in the SAME tick", r.stdout, "dispatch T2")
+chk("...so the tick did not come to rest", r.returncode, 1)
+
+# An answer beside the question un-parks it. This is the whole signal.
+(p / "tasks" / "T1" / "ANSWER.md").write_text("Exponential, capped at 30s.\n")
+chk("an ANSWER.md beside the question clears the block",
+    S.Plan(p).tasks["T1"].question, False)
+chk("...and the task records that it was answered",
+    S.Plan(p).tasks["T1"].answered, True)
+
+# SILENT CONTROL: a plan nobody asked anything in is untouched.
+p2 = mkplan("noquestions", [dict(tid="T1", owner="worker-a", agent="impl")])
+r2 = run_cli(["tick"], p2)
+hasnt("a plan with no questions says nothing about answers", r2.stdout, "asked")
+chk("...and dispatches normally", r2.returncode, 1)
+
+print("\n=== 7d · `run` holds for the answer, and says so once ===")
+p = mkplan("holds", [dict(tid="T1", owner="worker-a", agent="impl")])
+(p / "tasks" / "T1" / "QUESTIONS.md").write_text("# blocked\n\nWhich way?\n")
+
+# --no-wait is the cron/CI escape: nobody is coming, so exit and say so.
+r = run_cli(["run", "--no-wait", "--max-ticks", "3", "--interval", "0.1"], p)
+chk("`run --no-wait` exits 5 rather than holding", r.returncode, 5)
+has("...naming the question", r.stdout, "T1 asks")
+has("...and telling the reader how to answer", r.stdout, "ANSWER.md")
+
+# The default: hold, and resume on the answer. A thread drops ANSWER.md while
+# `run` is blocked — if the loop had exited on the person this returns long
+# before the answer and the resume assertion below fails.
+import threading
+def answer_later():
+    time.sleep(4)
+    (p / "tasks" / "T1" / "ANSWER.md").write_text("Exponential.\n")
+for f in ("STATUS.json", "PROGRESS.md"):
+    (p / f).unlink(missing_ok=True)
+(p / "tasks" / "T1" / "ANSWER.md").unlink(missing_ok=True)
+t = threading.Thread(target=answer_later, daemon=True); t.start()
+t0 = time.time()
+r = run_cli(["run", "--max-ticks", "30", "--interval", "0.2", "--max-wait", "2"], p)
+held = time.time() - t0
+chk("`run` did NOT exit on the person — it outlived the answer's arrival",
+    held > 3.5, True)
+has("...it says it is holding", r.stdout, "does not end because a person is needed")
+chk("...exactly once, not on every wait cycle",
+    r.stdout.count("WAITING ON A PERSON"), 1)
+has("...and it dispatched T1 after the answer landed", r.stdout, "dispatch T1")
+chk("...then ran on to a terminal reading of its own", r.returncode in (0, 3), True)
 
 
 print("\n=== 8 · the human surface says who is waited on ===")
