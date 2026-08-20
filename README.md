@@ -258,7 +258,14 @@ separate exit code, because your next move is different in each:
 | `0` | complete | every task verified |
 | `3` | stuck | nothing running, nothing ready. Something is wrong |
 | `4` | halted | an invariant broke, or a ruling said stop. Read it |
-| `5` | waiting on a person | a task is owned by a human. **Nothing is wrong** |
+| `5` | waiting on a person | only with `--no-wait`. **Nothing is wrong** |
+
+**The loop does not end because a person is needed.** A worker that hits a decision it may not
+make writes `tasks/<ID>/QUESTIONS.md`. You answer by putting `ANSWER.md` beside it — that file
+existing is the whole signal, so there is nothing to parse and nothing for you to remember. The
+question parks its own branch and nothing else; when the only work left is yours, `smokin run`
+**holds**: it watches the plan directory and carries on by itself the moment the answer lands.
+You are not the scheduler. `--no-wait` restores the exit for cron and CI, where nobody is coming.
 
 **A task a person owns is never handed to a model.** Grillin already decides who counts as a
 person — `**Owner:** human`, or `**Workers:** human` in PLAN.md for a plan of people with job

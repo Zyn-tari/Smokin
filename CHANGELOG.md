@@ -24,6 +24,29 @@ config — which is the designed behaviour, and still not a thing you want mid-j
 
 ---
 
+
+## v1.2.0 — 2026-08-20
+
+**The default behaviour of `smokin run` changed.** It no longer exits when a person is
+needed; it holds and resumes by itself. If you drive it from cron or CI, add `--no-wait` to
+get the old exit-5 behaviour back — otherwise it will wait for an answer that is not coming.
+
+### The loop does not end because a person is needed
+
+A person is not a worker with a task — they are the answer to a question the plan could not
+settle. Exiting on one made the operator the scheduler: notice, act, remember to re-run.
+
+`QUESTIONS.md` → `ANSWER.md`. The answer file existing is the entire signal, so there is nothing
+to parse, no marker to remember, and the question survives verbatim beside its answer. An open
+question parks its own branch and nothing else; `smokin run` holds and resumes by itself.
+
+It says it is holding **once**. An earlier revision re-ticked on every wait timeout and
+reprinted the banner every few seconds for as long as somebody was away — nothing is in flight
+in that state, so there is no worker to reap and nothing a bare tick would learn.
+
+`--no-wait` restores the exit for cron and CI. Two existing checks asserted the old contract and
+were updated rather than deleted, so the trade is visible in the test file.
+
 ## v1.1.0 — 2026-08-20
 
 **One new exit code, and it is not an error.** `smokin run` now exits **5** when a task is
