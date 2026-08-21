@@ -22,7 +22,7 @@ Low and slow. You put it on, you walk away for hours, and the one thing you neve
 is trust the clock — you go back and put a probe in it, because "it's been six hours"
 and "it's done" are different sentences.
 
-That's this. [**Grillin'**](https://github.com/A-Pex97/grillin) is the high-heat part,
+That's this. [**Grillin'**](https://github.com/Zyntari/Grillin) is the high-heat part,
 where you attack the plan before anyone builds. **Smokin'** is the long unattended part:
 it runs your plan for hours without you watching, and when a worker says it finished, it
 goes and checks the temperature instead of believing it.
@@ -36,7 +36,7 @@ Right — barbecue over. Here is the actual tool.
 | **More than one worker at once** | **Yes.** That is what this is for. |
 | **One worker, or you are doing it by hand** | **Partly** — you want `smokin verify`, and nothing else here. |
 | **You have no plan — just one task an agent claims it finished** | **Yes.** `smokin verify path/to/TASK.md`. No plan directory required, and there is a hook that does it for you. |
-| You have no plan and no task file either | Write one first — see [Grillin](https://github.com/A-Pex97/grillin). A `## Done means` you can re-run is the smallest unit this works on. |
+| You have no plan and no task file either | Write one first — see [Grillin](https://github.com/Zyntari/Grillin). A `## Done means` you can re-run is the smallest unit this works on. |
 
 **At n=1, you are the receipt. `verify` is the second hand.**
 
@@ -128,7 +128,7 @@ done-command as an independent check, regenerates a status surface a human can r
 
 It is not a method, a framework, or a daemon. It is three executables and a contract.
 
-The method is its sibling, [**Grillin**](https://github.com/A-Pex97/grillin), which turns a vague
+The method is its sibling, [**Grillin**](https://github.com/Zyntari/Grillin), which turns a vague
 ask into a plan an orchestrator can operate. Grillin stops at *"something else runs this."* For a
 long time that something else was a conversation, and a conversation dies. **Smokin is the
 something else.**
@@ -172,7 +172,7 @@ separate, later process.
 ## Quickstart
 
 ```bash
-git clone git@github.com:A-Pex97/smokin.git
+git clone git@github.com:Zyntari/Smokin.git
 export PATH="$PWD/smokin/bin:$PATH"
 
 smokin verify examples/demo-plan     # check a plan without starting anything
@@ -610,4 +610,4 @@ issue. That's useful information about whether this licence was the right call, 
 rather hear it than have you quietly walk away.
 
 
-<p align="center"><sub>built alongside <a href="https://github.com/A-Pex97/grillin">Grillin</a></sub></p>
+<p align="center"><sub>built alongside <a href="https://github.com/Zyntari/Grillin">Grillin</a></sub></p>
