@@ -7,7 +7,7 @@ smokin — an idempotent tick that dispatches a Grillin plan from disk.
     smokin tick              one pass: reap, gate, judge, dispatch, render
     smokin run               tick until there is nothing a runtime may do next
     smokin wait [--task T]   block until the plan moves, or until T settles
-    smokin status            print the frontier
+    smokin status            print the frontier; exit 1 iff work is in flight
     smokin present           re-render PROGRESS.md from STATUS.json
     smokin reap [--close]    force-reap overdue tasks (--close closes the tabs of
                              the tasks it reaped — never of ones that finished)
@@ -78,7 +78,7 @@ import sys
 import time
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 def _ver():
@@ -2556,11 +2556,46 @@ def main():
         write_progress(plan, st)
         if a.cmd == "present":
             print((root / "PROGRESS.md").read_text())
-        else:
-            c = st["counts"]
-            print(f"{c.get('verified',0)}/{st['total']} verified · "
-                  f"frontier: {', '.join(st['frontier']) or '—'}")
-        return 0
+            return 0
+        c = st["counts"]
+        inflight_n = (c.get("running", 0) + c.get("claimed", 0) + c.get("judging", 0))
+        rest = ("IN FLIGHT — do not update" if inflight_n else "at rest — safe to update")
+        print(f"{c.get('verified',0)}/{st['total']} verified · "
+              f"frontier: {', '.join(st['frontier']) or '—'} · {rest}")
+        # THE EXIT CODE IS THE ANSWER, and for two years it was not there.
+        # CHANGELOG's update policy says "smokin status <plan> — 0 = complete,
+        # 3 = stuck. Either is safe to update on. Exit 1 means work is in
+        # flight." That policy exists to stop the one upgrade that can lose
+        # work — swapping the binary under a running tick — and `status`
+        # returned 0 unconditionally, so anybody who followed it got a green
+        # light over a live fleet. Found by following our own instructions
+        # while upgrading a box with six real plans on it.
+        #
+        # Same ladder as `tick`, read from the same STATUS.json, so the two can
+        # never disagree: 0 complete · 1 in flight · 3 stuck · 4 halted ·
+        # 5 waiting on a person. It still starts nothing and asks nobody.
+        #
+        #   1 is the ONLY code that means "do not upgrade". Everything else is
+        #   a plan at rest, whatever the reason.
+        if halted(plan):
+            return 4
+        inflight = (c.get("running", 0) + c.get("claimed", 0) + c.get("judging", 0))
+        if inflight:
+            return 1
+        if plan.tasks and c.get("verified", 0) == len(plan.tasks):
+            return 0
+        # NOTHING IS RUNNING FROM HERE DOWN, so every code below is safe to
+        # update on. The distinction is what the operator does NEXT, and the
+        # one that matters is that READY-BUT-NOT-STARTED is not "in flight":
+        # a first draft of this returned 1 there, which is the same false alarm
+        # in the other direction — it would refuse a safe upgrade on four of the
+        # six plans this was found on.
+        waiting = [t["id"] for t in st["tasks"] if t.get("needs_human")
+                   and t.get("state") != "verified"]
+        ready = [t for t in st["frontier"] if t not in waiting]
+        if waiting and not ready:
+            return 5
+        return 3
     if a.cmd == "wait":
         return wait(plan, a.task, a.timeout, max(a.interval, 0.05))
     if a.cmd == "verify":

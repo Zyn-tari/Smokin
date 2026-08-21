@@ -458,6 +458,58 @@ has("...and it dispatched T1 after the answer landed", r.stdout, "dispatch T1")
 chk("...then ran on to a terminal reading of its own", r.returncode in (0, 3), True)
 
 
+print("\n=== 7e · `smokin status` answers the question the update policy asks ===")
+# THE DEFECT. CHANGELOG's update policy says "smokin status <plan> — 0 = complete,
+# 3 = stuck. Either is safe to update on. Exit 1 means work is in flight." That
+# policy exists to stop the one upgrade that can lose work — swapping the binary
+# under a running tick — and `status` returned 0 unconditionally. Anyone who
+# followed the instruction got a green light over a live fleet. Found by
+# following it while upgrading a box with six real plans on it.
+p = mkplan("st-complete", [dict(tid="T1", owner="worker-a", agent="impl")])
+(p / "tasks" / "T1" / "OUT.md").write_text("done\n")
+for _ in range(12):
+    if run_cli(["tick"], p).returncode != 1:
+        break
+    time.sleep(0.4)
+r = run_cli(["status"], p)
+chk("a complete plan reports 0", r.returncode, 0)
+has("...and says it is safe to update", r.stdout, "safe to update")
+
+# THE ONE THAT MATTERS: something actually running must say so.
+p = mkplan("st-flight", [dict(tid="T1", owner="worker-a", agent="impl")])
+run_cli(["tick"], p)                       # dispatches T1, no receipt yet
+r = run_cli(["status"], p)
+chk("a plan with work in flight reports 1, NOT 0", r.returncode, 1)
+has("...and says not to update", r.stdout, "do not update")
+
+# AND THE FALSE ALARM IN THE OTHER DIRECTION. Ready-but-unstarted is not in
+# flight; a first draft returned 1 here, which would refuse a safe upgrade on
+# four of the six plans this was found on.
+p = mkplan("st-ready", [dict(tid="T1", owner="worker-a", agent="impl")])
+r = run_cli(["status"], p)
+chk("ready-but-not-started is at rest, not in flight", r.returncode, 3)
+has("...and says so", r.stdout, "safe to update")
+
+p = mkplan("st-stuck", [dict(tid="T1", owner="worker-a", agent="impl", blocked="T9")])
+chk("a genuinely stuck plan reports 3", run_cli(["status"], p).returncode, 3)
+
+p = mkplan("st-person", [dict(tid="T1", owner="human")])
+chk("a plan whose only work is a person's reports 5", run_cli(["status"], p).returncode, 5)
+
+p = mkplan("st-halt", [dict(tid="T1", owner="worker-a", agent="impl")])
+S.halt(S.Plan(p), "a fixture halt", tier="1")
+chk("a halted plan reports 4", run_cli(["status"], p).returncode, 4)
+
+# SILENT CONTROLS: status still starts nothing, and `present` stays a renderer.
+p = mkplan("st-readonly", [dict(tid="T1", owner="worker-a", agent="impl")])
+run_cli(["status"], p)
+chk("status started nothing", (p / ".smokin" / "dispatch").exists()
+    and len(list((p / ".smokin" / "dispatch").glob("*.json"))) or 0, 0)
+chk("...and left the task alone", S.Plan(p).tasks["T1"].status, "NOT STARTED")
+chk("`present` is a renderer and keeps returning 0",
+    run_cli(["present"], p).returncode, 0)
+
+
 print("\n=== 8 · the human surface says who is waited on ===")
 p = mkplan("surface", [dict(tid="T1", owner="human"),
                        dict(tid="T2", owner="worker-b", agent="impl")])

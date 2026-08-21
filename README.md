@@ -200,7 +200,7 @@ verdict  T3  REFUTED
 | `smokin tick <plan>` | one pass: reap · gate · **judge** · dispatch · render. **Safe to run at any time, from anywhere** |
 | `smokin run <plan>` | tick until there is nothing a runtime may do next. Start it and walk away |
 | `smokin wait <plan> --task T1` | block until `T1` settles. What operators were writing a `wait-for-agent.sh` for |
-| `smokin status <plan>` | one line: how many verified, what is ready |
+| `smokin status <plan>` | one line: how many verified, what is ready — and **`1` in the exit code means something is running right now.** The question to ask before you upgrade |
 | `smokin present <plan>` | print `PROGRESS.md` |
 | `smokin reap <plan> [--close]` | force-reap overdue tasks; `--close` also tidies the pane |
 | `smokin rulings <plan>` | resolve and print the judgement layer, and the ledger it has written |
@@ -550,7 +550,7 @@ workers are `sleep 1` — would be measuring the fixture and calling it a measur
 ## Updating
 
 ```bash
-smokin status <plan>     # 0 complete, 3 stuck — either is safe. 1 means work is in flight
+smokin status <plan>     # 1 = something is running. Every other code is a plan at rest
 git pull
 smokin --version
 ```

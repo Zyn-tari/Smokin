@@ -11,12 +11,15 @@ protects you from it — the whole point is that state survives the *process*, n
 survives a change of schema.
 
 ```bash
-smokin status <plan>     # 0 = complete, 3 = stuck. Either is safe to update on.
+smokin status <plan>     # 1 = work in flight. Anything else is a plan at rest.
 git pull                 # then update
 ```
 
-Exit `1` means work is in flight. Wait for it, or `smokin reap <plan>` first and let the
-reaper close the dispatches out properly.
+Exit **`1` is the only one that means do not update** — something is running right now. Wait
+for it, or `smokin reap <plan>` first and let the reaper close the dispatches out properly.
+Every other code is a plan at rest and safe to upgrade on: `0` complete, `3` idle (stuck, or
+ready and waiting for a tick), `4` halted, `5` waiting on a person. The command prints which
+in words, so you do not have to hold the ladder in your head.
 
 `_RULINGS.toml` and `_INVARIANTS.toml` are read at every tick. If a version changes what
 they accept, an in-flight plan halts loudly rather than running on a half-understood
@@ -24,6 +27,32 @@ config — which is the designed behaviour, and still not a thing you want mid-j
 
 ---
 
+
+## v1.3.0 — 2026-08-21
+
+**`smokin status` now returns a meaningful exit code.** It always returned 0. A script written
+as `smokin status <plan> && ...` will now branch differently — which is the point, and why this
+is a minor bump rather than a patch.
+
+### `smokin status` never answered the question its own policy asks
+
+The update policy at the top of this file has always said *"exit 1 means work is in flight"* —
+the check that exists to stop the one upgrade that can lose work, swapping the binary under a
+running tick. **`status` returned 0 unconditionally.** Anyone who followed the instruction got
+a green light over a live fleet.
+
+Found by following it, on a box with six real plans on it, while upgrading that box.
+
+`status` now returns the same ladder `tick` does, read from the same `STATUS.json` so the two
+cannot disagree: `0` complete · `1` in flight · `3` idle · `4` halted · `5` waiting on a
+person. It still starts nothing and asks nobody, and it prints "IN FLIGHT — do not update" or
+"at rest — safe to update" in words.
+
+**A first draft returned `1` for ready-but-not-started**, which is the same false alarm in the
+other direction — it would have refused a safe upgrade on four of the six plans that found the
+original bug. Ready-but-unstarted is a plan at rest.
+
+`present` is unchanged and still exits 0: it is a renderer, not a question.
 
 ## v1.2.0 — 2026-08-20
 
