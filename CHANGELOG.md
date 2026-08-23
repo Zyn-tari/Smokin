@@ -28,6 +28,26 @@ config — which is the designed behaviour, and still not a thing you want mid-j
 ---
 
 
+## v1.3.1 — 2026-08-23
+
+**The receipt now honours a worker's declared block.** `smokin-emit` set `claim = "blocked"` only
+when `QUESTIONS.md` was present. A worker that wrote `**Status:** BLOCKED` in its own TASK.md and
+stopped was recorded as `partial` — retryable — and the task was quietly handed to the next runtime.
+
+### `**Status:** BLOCKED` was written by workers and read by nothing
+
+There are two honest ways for a worker to stop: it writes `QUESTIONS.md` (a decision it may not make),
+or it sets `**Status:** BLOCKED` in its TASK.md. `emit` read only the first. The second reached the gate
+as `partial`, so the frontier treated a declared block as unfinished work and dispatched it onward — which
+made writing `QUESTIONS.md` the *only* lever that actually parked a task. A signal you have to bypass the
+declared one to send is a gap, and it was found by a worker taking the declared path and being ignored.
+
+`emit` now reads the Status field, and a declared `BLOCKED` flips the claim exactly as an open
+`QUESTIONS.md` does. A self-declared block only ever *downgrades* a claim — it can never manufacture a
+`done` the gate did not witness — so honouring it adds no way to fake success. Dispatch resets Status to
+`IN PROGRESS` before the worker runs, so a stale `BLOCKED` from a prior verdict cannot leak into a fresh
+receipt.
+
 ## v1.3.0 — 2026-08-21
 
 **`smokin status` now returns a meaningful exit code.** It always returned 0. A script written

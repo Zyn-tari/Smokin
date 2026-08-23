@@ -129,6 +129,28 @@ printf '{"terminal":"ok","exit":0}' | SMOKIN_PLAN="$P" "$ROOT/bin/smokin-emit" T
 v="$(python3 -c "import json;print(json.load(open('$P/tasks/T1/VERDICT.json'))['pass'])" 2>/dev/null)"
 chk "an agent claiming done is refuted by the gate" "$v" "False"
 
+# ── 6a · a declared block reaches the receipt ───────────────────────────────
+# The gap: emit set claim="blocked" ONLY from QUESTIONS.md, never from the
+# worker's own **Status:** BLOCKED. A plainly declared block was filed as
+# "partial" (retryable), and writing QUESTIONS.md was the only thing that
+# actually flipped the receipt — that made it a bypass. This drives emit the way
+# the wrapper's trap does: one emission reading the TASK.md the worker left
+# behind (a hand-built dispatch record so no live worker races the status edit).
+mkemit() { # $1=dir  $2=status-value  — writes TASK.md + a dispatch record
+  rm -rf "$1"; mkdir -p "$1/tasks/T1/.smokin" "$1/.smokin/dispatch"
+  printf '**Status:** %s\n**Owner:** worker-T1\n' "$2" > "$1/tasks/T1/TASK.md"
+  printf '{"seq":"r:1","run":"r","attempt":1,"runtime":"demo","dispatch":"inproc","placement":"inproc","started":"2026-01-01T00:00:00Z","started_ns":1,"started_epoch":1}\n' \
+    > "$1/.smokin/dispatch/T1.json"
+}
+claimof() { python3 -c "import json;print(json.load(open('$1/tasks/T1/RECEIPT.json'))['claim'])" 2>/dev/null; }
+P="$LAB/declared-block"; mkemit "$P" "BLOCKED"
+printf '{"terminal":"ok","exit":0}' | SMOKIN_PLAN="$P" "$ROOT/bin/smokin-emit" T1 blocked-decl >/dev/null 2>&1
+chk "a worker's declared BLOCKED reaches the receipt"  "$(claimof "$P")" "blocked"
+# control: same setup, status NOT blocked, no FINDINGS, no QUESTIONS — still partial.
+Q="$LAB/no-block"; mkemit "$Q" "IN PROGRESS"
+printf '{"terminal":"ok","exit":0}' | SMOKIN_PLAN="$Q" "$ROOT/bin/smokin-emit" T1 plain >/dev/null 2>&1
+chk "...and a non-blocked worker is still just partial"  "$(claimof "$Q")" "partial"
+
 # ── 6b · doctor on the path every REAL plan takes ───────────────────────────
 # A plan with no .smokin/runtimes.json falls back to the shipped template. Every
 # test above ships its own, so that fallback was the one branch nothing ran — and

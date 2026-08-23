@@ -24,6 +24,7 @@ receipt and nothing handles a corrupted run.
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,21 @@ def sha(p: Path):
         return "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+# The worker's own **Status:** in TASK.md, upper-cased, "" if unreadable. Same
+# field grammar as bin/smokin's RE_STATUS — fields may share a line, so the match
+# stops at the next `**` or `·`. Kept local because this file imports nothing from
+# bin/smokin by design (see the module docstring's zero-dependency rule).
+RE_STATUS = re.compile(r"\*\*Status:\*\*\s*([^·\n]*?)(?=\*\*|·|$)", re.M | re.I)
+
+
+def declared_status(tdir: Path) -> str:
+    try:
+        m = RE_STATUS.search((tdir / "TASK.md").read_text(errors="replace"))
+    except OSError:
+        return ""
+    return m.group(1).strip().upper() if m else ""
 
 
 def atomic_write(target: Path, data: str):
@@ -120,7 +136,19 @@ def main() -> int:
         terminal = "no-artefact"
 
     claim = "done" if produced else "partial"
-    if (tdir / "QUESTIONS.md").is_file() and (tdir / "QUESTIONS.md").stat().st_size > 0:
+    # BLOCKED IS A DECLARATION, NOT ONLY A FILE. A worker can stop two ways and
+    # both must reach the receipt: it writes QUESTIONS.md (a decision it may not
+    # make), OR it sets **Status:** BLOCKED in its own TASK.md. Reading only the
+    # first meant a plainly declared block was recorded as "partial" — the task
+    # then looked retryable, and writing QUESTIONS.md was the ONLY thing that
+    # actually flipped the receipt, so that became the bypass. A self-declared
+    # block only ever downgrades a claim (it can never invent "done"), so
+    # honouring it carries no way to fake success. Dispatch resets Status to
+    # IN PROGRESS before the worker runs, so a stale BLOCKED from a prior verdict
+    # cannot leak here.
+    if (declared_status(tdir) == "BLOCKED"
+            or ((tdir / "QUESTIONS.md").is_file()
+                and (tdir / "QUESTIONS.md").stat().st_size > 0)):
         claim = "blocked"
 
     # The capability table, read here for exactly one reason: the transcript's
