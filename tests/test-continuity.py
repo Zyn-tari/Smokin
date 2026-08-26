@@ -208,9 +208,15 @@ print("\n=== 4 · PARKED, not blocking — the tick carries on around it ===")
 # THE LOAD-BEARING CHECK IN THIS FILE. If the human task stopped the tick, the
 # word "continuous" would be false, and the failure would look like success:
 # nothing crashes, work simply does not happen.
+# T2 and T3 carry DIFFERENT personas on purpose. They used to share `impl`,
+# which was incidental to what this scenario asserts — that a parked human task
+# does not stop the tick — and it stopped being harmless when dispatch learned
+# to hold a persona's second task back (one worktree, one checked-out branch).
+# Sharing a persona here would have made this test fail for a reason that has
+# nothing to do with the rule it exists to protect.
 p = mkplan("park", [dict(tid="T1", owner="human"),
                     dict(tid="T2", owner="worker-b", agent="impl"),
-                    dict(tid="T3", owner="worker-c", agent="impl")])
+                    dict(tid="T3", owner="worker-c", agent="impl-b")])
 r = run_cli(["tick"], p)
 out = r.stdout
 has("the person's task is reported as awaiting", out, "awaiting T1")

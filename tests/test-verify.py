@@ -36,8 +36,15 @@ def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
-def plan(name, t2_cmd="test -s tasks/T2/OUT.md", rulings=None):
-    """A two-task plan with NO receipts and NO dispatch records — the n=1 case."""
+def plan(name, t2_cmd="test -s tasks/T2/OUT.md", rulings=None, status="NOT STARTED"):
+    """A two-task plan with NO receipts and NO dispatch records — the n=1 case.
+
+    `status` is a parameter because it decides whether anything has CLAIMED the
+    task is done, and `refuted` means "claimed, and the command disagreed". This
+    fixture wrote NOT STARTED unconditionally while a section below was headed
+    "a claim the gate disagrees with" — so that test asserted a refutation of a
+    claim nobody had made, and passed only because the code under test called
+    every failing verdict refuted."""
     p = LAB / name
     shutil.rmtree(p, ignore_errors=True)
     (p / ".smokin").mkdir(parents=True)
@@ -47,7 +54,7 @@ def plan(name, t2_cmd="test -s tasks/T2/OUT.md", rulings=None):
         d = p / "tasks" / tid
         d.mkdir(parents=True)
         d.joinpath("TASK.md").write_text(
-            f"# {tid} — test\n\n**Status:** NOT STARTED\n**Owner:** worker-{tid}\n"
+            f"# {tid} — test\n\n**Status:** {status}\n**Owner:** worker-{tid}\n"
             f"**Blocked by:** — · **Blocks:** —\n"
             f"**Dispatch:** inproc · **Runtime:** `demo`\n"
             f"**Budget:** 60 · **Interrupt:** no · **Watch:** no\n\n"
@@ -89,7 +96,9 @@ chk("PROGRESS.md says the task is verified",
     "●" in (P / "PROGRESS.md").read_text(), True)
 
 print("\n=== a claim the gate disagrees with ===")
-P = plan("refuted", t2_cmd="test -s tasks/T2/MISSING.md")
+# DONE is the claim. Without it there is nothing for the gate to disagree
+# with, and the correct word is not REFUTED.
+P = plan("refuted", t2_cmd="test -s tasks/T2/MISSING.md", status="DONE")
 rc, out = run("verify", P)
 chk("exits 1 when a task fails its own gate", rc, 1)
 chk("T2 refuted", json.loads((P / "tasks/T2/VERDICT.json").read_text())["pass"], False)
@@ -143,6 +152,49 @@ t.write_text(t.read_text().replace("**Owner:** worker-T2",
 rc, out = run("verify", P)
 chk("says the adversary's independence is unverified",
     "independence is unverified" in out, True)
+
+print("\n=== verify must not brick a plan nobody has started ===")
+# S6, from the first real XL-band run. `verify` is the documented way to check a
+# plan BEFORE executing it. It wrote a failing verdict into all 180 unstarted
+# tasks; `refuted` outranked `ready`; the next tick called the plan STUCK, and
+# eleven tracks were recovered by deleting 180 verdicts by hand. A NOT STARTED
+# task whose done-command fails is the EXPECTED state — the property grillin's
+# gate-fails-first asserts — so it is a reading, not a refutation.
+P = plan("unstarted", t2_cmd="test -s tasks/T2/MISSING.md")
+rc, out = run("verify", P)
+chk("verify still reports the failure", rc, 1)
+chk("...and still records the verdict, because it is a true reading",
+    json.loads((P / "tasks/T2/VERDICT.json").read_text())["pass"], False)
+chk("...but does NOT call unclaimed work refuted", "REFUTED" in out, False)
+chk("...saying instead that nothing claimed it", "nothing claimed" in out, True)
+# The proof the brick is gone is that the next tick DISPATCHES rather than
+# refusing. It is not "the plan is never stuck afterwards": this fixture's demo
+# runtime is `true`, so T2 finishes instantly, its gate genuinely fails, and a
+# task that really was claimed and really did disagree is refuted — correctly.
+# Asserting on the end state would have asserted against the feature.
+run("tick", P)
+chk("...so the next tick DISPATCHES it instead of refusing",
+    (P / "tasks" / "T2" / "TASK.md").read_text().count("**Status:** NOT STARTED"), 0)
+
+print("\n=== a dry run touches nothing a worker would see ===")
+# S7. launch() returns before writing anything into the task folder and says so
+# in a comment — then the dispatch loop flipped **Status:** to IN PROGRESS
+# anyway, on every task the dry run considered, leaving tracked files modified
+# in git. A status line is precisely something a worker sees: the templates call
+# it "the progress record, and the only one that survives a lost conversation".
+P = plan("dryrun")
+before = {t.name: (P / "tasks" / t.name / "TASK.md").read_text()
+          for t in (P / "tasks").iterdir()}
+rc, out = run("tick", P, "--dry-run")
+chk("the dry run reports what it would do", "dry-run" in out, True)
+for tid, text in before.items():
+    chk(f"...and leaves {tid}'s TASK.md byte-identical",
+        (P / "tasks" / tid / "TASK.md").read_text(), text)
+# The record itself is deliberate — a dry run "writes its own record" — but
+# `rec["dry"]` was written and read by nothing, so the plan read as in-flight
+# afterwards and `smokin run` would wait on tasks nobody had started.
+chk("...and does not leave the plan looking in-flight",
+    "in flight" in out and not out.strip().startswith("0"), True)
 
 print(f"\n{'ALL PASS' if not fails else str(fails) + ' FAILED'}  ({LAB})")
 if not fails:

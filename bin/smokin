@@ -225,6 +225,28 @@ RE_TASK_ID = re.compile(r"\b([A-Z]\d{1,3}[a-z]?)\b")
 RE_FENCE = re.compile(r"```[a-z]*\n(.*?)```", re.S)
 
 PANE_CEILING = {"XS": 0, "S": 1, "M": 3, "L": 5, "XL": 5}
+
+# HOW MANY OF ONE PERSONA'S TASKS MAY BE IN FLIGHT AT ONCE. One, because the
+# failure it prevents is silent and the cost is only latency.
+#
+# A git worktree has exactly one checked-out branch and an index has one lock.
+# A plan that gives each persona a persistent worktree — which is what makes a
+# persona accumulate anything across tasks — puts every one of that persona's
+# tasks in the same directory. The tick dispatched the whole ready frontier at
+# once, one persona held five of them, and a concurrent task committed another
+# task's staged files while both reported success. Git does not error on this;
+# it interleaves.
+#
+# The gate's half of this is `worktree-disjoint`, which refuses two concurrent
+# tasks that DECLARE the same worktree. This is the runner's half, and neither
+# replaces the other: the gate cannot see who actually ran, and the runner
+# cannot see a plan that never declared a worktree at all.
+#
+# Consolidating many tasks onto few personas is what an XL plan-of-plans does by
+# design, so this is the normal case rather than an edge one. It also happens to
+# be what a subscription-billed budget wants — the correct behaviour for git and
+# the affordable one are the same behaviour.
+AGENTS_IN_FLIGHT_DEFAULT = 1
 DEFAULT_BUDGET = 900
 
 
@@ -433,6 +455,39 @@ class Plan:
         except (OSError, ValueError):
             return None
 
+    def max_in_flight_per_agent(self):
+        """How many of one persona's tasks may be dispatched at once.
+
+        `max_in_flight_per_agent` in the plan's SMOKIN.json overrides it. The
+        default is 1 and should stay 1 unless a plan is certain its personas do
+        not share a working directory — see AGENTS_IN_FLIGHT_DEFAULT for why.
+        """
+        try:
+            n = int(json.loads((self.root / "SMOKIN.json").read_text())
+                    .get("max_in_flight_per_agent", AGENTS_IN_FLIGHT_DEFAULT))
+        except (OSError, ValueError, TypeError):
+            return AGENTS_IN_FLIGHT_DEFAULT
+        return max(1, n)
+
+    def has_claim(self, tid):
+        """Has anything asserted this task is done?
+
+        Two forms, and both count. A RECEIPT.json is the explicit one a worker
+        emits. A **Status:** line that has moved off NOT STARTED is the one a
+        person or an agent writes by hand — the templates call it "the progress
+        record, and the only one that survives a lost conversation", so treating
+        it as nothing would be inconsistent with the rest of this tool.
+
+        This exists so `refuted` can mean what the docs say it means: *claimed,
+        and the command disagreed*. `verify-on-stop` fires because an agent
+        stopped and said done, and that IS a claim; an operator running `verify`
+        over 180 NOT STARTED tasks to check a plan before running it is not.
+        """
+        if self.receipt(tid):
+            return True
+        t = self.tasks.get(tid)
+        return bool(t and t.status != "NOT STARTED")
+
     def dispatch_rec(self, tid):
         try:
             return json.loads((self.priv / "dispatch" / f"{tid}.json").read_text())
@@ -505,12 +560,33 @@ class Plan:
         if v and v.get("pass"):
             return self.ruling_state(tid)
         if v and not v.get("pass"):
-            return "refuted"
+            # REFUTED IS "CLAIMED, AND THE COMMAND DISAGREED" — and with no claim
+            # there is nothing to disagree with. This returned "refuted" on the
+            # strength of the verdict alone, and `smokin verify` writes a verdict
+            # for every task including the ones nobody has started. On a plan of
+            # 180 unstarted tasks the documented way to check a plan before
+            # running it — verify — marked all 180 refuted, refuted outranks
+            # ready, and the next tick reported the plan STUCK. Eleven tracks
+            # were recovered by deleting 180 verdicts by hand.
+            #
+            # A NOT STARTED task whose done-command fails is the EXPECTED state:
+            # it is the property grillin's gate-fails-first exists to assert, and
+            # re-running it here is how that assertion is confirmed at runtime.
+            # So the failing verdict is kept and recorded — it is a true reading —
+            # and it simply is not a refutation until somebody claims otherwise.
+            if self.has_claim(tid):
+                return "refuted"
         r = self.receipt(tid)
         if r and not r.get("stale"):
             return "claimed"
-        if self.dispatch_rec(tid):
+        d = self.dispatch_rec(tid)
+        if d and not d.get("dry"):
             return "running"
+        # `rec["dry"] = True` was written by every dry run and read by nothing,
+        # so a dry record was indistinguishable from a live dispatch and the plan
+        # read as in-flight afterwards. The record itself is deliberate — a dry
+        # run "writes its own record" — so it stays; it just stops lying about
+        # what happened.
         if t.blocked_by - {k for k in self.tasks if self.state_cheap(k) == "verified"}:
             return "blocked"
         return "ready"
@@ -858,7 +934,14 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
 
     env = dict(os.environ,
                SMOKIN_PLAN=str(plan.root), SMOKIN_TASK_ID=t.id,
-               SMOKIN_TASK_DIR=str(t.dir), SMOKIN_EMIT=str(HERE / "smokin-emit"))
+               SMOKIN_TASK_DIR=str(t.dir), SMOKIN_EMIT=str(HERE / "smokin-emit"),
+               # THE PERSONA, twenty lines before the dispatch record writes the
+               # same value. Per-agent memory needs a per-agent identity, and
+               # without this every per-agent tool has to re-open and re-parse
+               # TASK.md to learn who it is serving — which one plan did, in a
+               # wrapper written for exactly that. Empty string, not absent, so a
+               # consumer can tell "no persona declared" from "old smokin".
+               SMOKIN_AGENT=t.agent or "")
 
     rec = {"run": rid, "seq": seq, "task": t.id, "attempt": 1,
            "dispatch": decision, "clause": clause, "runtime": t.runtime,
@@ -921,7 +1004,16 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
         # from a `**Agent:**` field, so the substitution no longer trusts its
         # own input. `shlex.quote` makes the line exactly one argument, which
         # is what every `pane` row in runtimes.json already means by `{LINE}`.
-        inner = (tmpl.replace("{WT}", str(plan.root))
+        inner = (tmpl.replace("{PLAN_ROOT}", str(plan.root))
+             # {WT} IS NOT A WORKTREE AND NEVER WAS — it expands to the
+             # plan root, and dispatch runs with cwd=plan.root too. One
+             # plan designed a per-agent worktree around it and derived
+             # identity from `basename $PWD`, which resolves to the TRACK
+             # name, so every agent in a track would silently have shared
+             # one memory. They caught it by reading this source, not from
+             # any error. {PLAN_ROOT} is the name that describes the value;
+             # {WT} stays because runtimes.json files in the field use it.
+                      .replace("{WT}", str(plan.root))
                      .replace("{LINE}", shlex.quote(line)))
         cmd = (f"SMOKIN_PLAN={plan.root} SMOKIN_EMIT={HERE/'smokin-emit'} "
                f"bash {wrapper} {t.id} -- {inner}")
@@ -983,7 +1075,9 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     if not head:
         return decision, "no-headless-mode"
     (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
-    argv = ["bash", wrapper, t.id, "--"] + head.split() + [line]
+    # The persona flag goes BEFORE the dispatch line, which is always last.
+    argv = (["bash", wrapper, t.id, "--"] + head.split()
+            + persona_argv(row, plan, t) + [line])
     p = subprocess.Popen(argv, cwd=str(plan.root), env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -991,6 +1085,52 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     rec["session"] = f"pid:{p.pid}"        # a fresh process = a fresh context
     (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
     return decision, f"pid {p.pid}"
+
+
+# FLAGS THAT SWALLOW WHAT FOLLOWS THEM. Smokin appends the dispatch line LAST, so
+# a headless launch string ending in a variadic flag eats it as one more value:
+# `--mcp-config a.json` + the line produced
+# `MCP config file not found: .../read tasks/H1/TASK.md and follow it`.
+# Reported from the field with that exact error.
+VARIADIC_FLAGS = {"--mcp-config", "--allowedTools", "--allowed-tools",
+                  "--disallowedTools", "--disallowed-tools", "--add-dir"}
+
+
+def persona_argv(row: dict, plan: "Plan", t: "Task"):
+    """The optional `persona_flag` row, expanded, or [].
+
+    WHY THIS EXISTS. The persona name is deliberately NOT in the dispatch line —
+    one shaped like `impl; touch /tmp/PWNED #` achieved command execution through
+    it, confirmed end to end, and it stays out. But a plan still has to get its
+    persona to the model somehow, and with no mechanism at all every plan that
+    uses personas wraps the runtime and re-parses TASK.md to do it. One did.
+
+    So the runtime row may say HOW a persona reaches the model:
+
+        "persona_flag": "--append-system-prompt-file {PERSONA_FILE}"
+
+    `{PERSONA}` is the validated name; `{PERSONA_FILE}` is `<plan>/<persona_dir>/
+    <name>.md`, default persona_dir `_personas`. Both are shell-quoted, the name
+    must match RE_AGENT_OK, and a {PERSONA_FILE} that does not exist drops the
+    flag rather than passing a path the model will fail on — silently launching
+    without a persona is better than launching with a broken argument, and the
+    ledger says which happened.
+    """
+    tmpl = (row or {}).get("persona_flag")
+    if not tmpl or not t.agent or not RE_AGENT_OK.match(t.agent):
+        return []
+    pdir = "_personas"
+    try:
+        pdir = json.loads((plan.root / "SMOKIN.json").read_text()).get(
+            "persona_dir", pdir)
+    except (OSError, ValueError):
+        pass
+    pfile = plan.root / pdir / f"{t.agent}.md"
+    if "{PERSONA_FILE}" in tmpl and not pfile.is_file():
+        return []
+    out = (tmpl.replace("{PERSONA_FILE}", shlex.quote(str(pfile)))
+               .replace("{PERSONA}", shlex.quote(t.agent)))
+    return shlex.split(out)
 
 
 def sh(argv, timeout=20):
@@ -1192,6 +1332,18 @@ def remember_verdict(plan: Plan, t: Task, v: dict):
                note="reported, not written — evidence a skill should exist is not "
                     "authority to write one")
     return e
+
+
+def label_verdict(plan: "Plan", tid: str, v: dict) -> str:
+    """PASS, REFUTED, or — where nobody has claimed anything — NOT YET.
+
+    Printing REFUTED at a task nobody has started reads as an accusation about
+    work, and it was the visible half of a state bug that marked 180 unstarted
+    tasks refuted and stuck the plan. The word now says which of the two it is.
+    """
+    if v.get("pass"):
+        return "PASS"
+    return "REFUTED" if plan.has_claim(tid) else "not yet — nothing claimed"
 
 
 def take_verdict(plan: Plan, tid: str, write_status: bool = True,
@@ -1456,7 +1608,7 @@ def verify(plan: Plan, only=None):
             return 2
         v = take_verdict(plan, tid, write_status=False, remember=False)
         verdicted.append(tid)
-        print(f"  verdict  {tid}  {'PASS' if v['pass'] else 'REFUTED'}")
+        print(f"  verdict  {tid}  {label_verdict(plan, tid, v)}")
 
     plan.__init__(plan.root)
 
@@ -1676,6 +1828,22 @@ def tick(plan: Plan, dry=False, close_panes=False):
         print(f"  ruling   {r.get('task')}  {r.get('class')}  {r.get('outcome')}")
 
     ceiling = PANE_CEILING[plan.size()]
+    # Per-persona in-flight count, from the same records live_panes reads: a
+    # dispatch with no receipt beside it is still out there. Dry records are
+    # excluded — they never started anything.
+    agent_cap = plan.max_in_flight_per_agent()
+    in_flight_by_agent = {}
+    if (plan.priv / "dispatch").is_dir():
+        for f in (plan.priv / "dispatch").glob("*.json"):
+            try:
+                rec = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if rec.get("dry") or not rec.get("agent"):
+                continue
+            if (plan.root / "tasks" / rec["task"] / "RECEIPT.json").is_file():
+                continue
+            in_flight_by_agent[rec["agent"]] = in_flight_by_agent.get(rec["agent"], 0) + 1
     live_panes = sum(1 for f in (plan.priv / "dispatch").glob("*.json")
                      if json.loads(f.read_text()).get("dispatch") == "pane"
                      and not (plan.root / "tasks" /
@@ -1716,6 +1884,14 @@ def tick(plan: Plan, dry=False, close_panes=False):
         if decision == "pane" and live_panes >= ceiling:
             queued.append((tid, "pane-ceiling"))
             continue
+        if t.agent and in_flight_by_agent.get(t.agent, 0) >= agent_cap:
+            # Held, not failed. The next tick takes it, exactly as if it had been
+            # blocked — which, by git's rules, it was.
+            queued.append((tid, f"agent-busy:{t.agent}"))
+            ledger(plan, event="held-agent-busy", task=tid, agent=t.agent,
+                   why=f"{t.agent} already has {in_flight_by_agent[t.agent]} task(s) "
+                       f"in flight and the cap is {agent_cap}")
+            continue
         d, where = launch(plan, t, rts, dry=dry)
         if where in ("no-headless-mode", "pane-unavailable"):
             # Do NOT mark it started. A task marked IN PROGRESS with no dispatch
@@ -1727,7 +1903,16 @@ def tick(plan: Plan, dry=False, close_panes=False):
             continue
         if d == "pane":
             live_panes += 1
-        t.set_status("IN PROGRESS")
+        if t.agent:
+            in_flight_by_agent[t.agent] = in_flight_by_agent.get(t.agent, 0) + 1
+        # NOT ON A DRY RUN. launch() returns before it touches anything a worker
+        # would see, and says so in a comment one line down — then this ran
+        # anyway and flipped the status of every task the dry run considered.
+        # A status line is exactly something a worker sees: the templates call it
+        # "the progress record, and the only one that survives a lost
+        # conversation". A dry run left four tracked files modified in git.
+        if not dry:
+            t.set_status("IN PROGRESS")
         dispatched.append((tid, d, where))
         ledger(plan, event="dispatched", task=tid, dispatch=d, where=str(where))
         if adversarial:
@@ -1773,7 +1958,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
     for tid in reaped:
         print(f"  reaped   {tid}")
     for tid, v in verdicts.items():
-        print(f"  verdict  {tid}  {'PASS' if v['pass'] else 'REFUTED'}")
+        print(f"  verdict  {tid}  {label_verdict(plan, tid, v)}")
     for tid, d, where in dispatched:
         print(f"  dispatch {tid}  {d}  {where}")
     for tid, why in queued:
@@ -2158,7 +2343,14 @@ def doctor(plan: Plan):
         out["runtimes"][name] = {
             "installed": bool(head and shutil.which(head[0])),
             "path": shutil.which(head[0]) if head else None,
-            "headless": bool(row.get("headless")), "pane": bool(row.get("pane"))}
+            "headless": bool(row.get("headless")), "pane": bool(row.get("pane")),
+            # Smokin appends the dispatch line LAST. A launch string that ends in
+            # a variadic flag eats it as one more value, and the error names a
+            # file that is really the instruction: "MCP config file not found:
+            # .../read tasks/H1/TASK.md and follow it". Cheap to check, and the
+            # only place anyone would look after seeing that message.
+            "swallows_dispatch_line": bool(head) and head[-1] in VARIADIC_FLAGS,
+            "persona_flag": bool(row.get("persona_flag"))}
     out["host"] = {
         "herdr": bool(shutil.which("herdr")), "inside_herdr": os.environ.get("HERDR_ENV") == "1",
         "python": sys.version.split()[0],
@@ -2183,7 +2375,13 @@ def doctor(plan: Plan):
     for n, r in sorted(out["runtimes"].items()):
         mark = "ok      " if r["installed"] else "MISSING "
         print(f"runtime   {mark}{n:<12} headless={'y' if r['headless'] else 'n'} "
-              f"pane={'y' if r['pane'] else 'n'}")
+              f"pane={'y' if r['pane'] else 'n'}"
+              f"{'  persona=y' if r.get('persona_flag') else ''}")
+        if r.get("swallows_dispatch_line"):
+            print(f"          WARNING   {n}'s launch string ends in a variadic flag. "
+                  f"Smokin appends the dispatch line last, so that flag will "
+                  f"consume it and the runtime will report the instruction as a "
+                  f"missing file. Put a non-list argument last.")
     missing = [n for n, r in out["runtimes"].items() if not r["installed"]]
     if missing:
         print(f"\n{len(missing)} runtime(s) declared and not installed: {', '.join(missing)}.")

@@ -308,6 +308,14 @@ else
   cat "$LAB/continuity.out"
 fi
 
+if python3 "$ROOT/tests/test-agent-serialisation.py" > "$LAB/agentser.out" 2>&1; then
+  n=$(count_pass "$LAB/agentser.out")
+  ok "agent serialisation: $n checks on one persona, one task in flight"
+else
+  bad "agent serialisation" "see below"
+  cat "$LAB/agentser.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"
