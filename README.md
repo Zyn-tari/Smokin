@@ -484,7 +484,7 @@ you cannot reconstruct it from the plan directory, it does not exist.
 | [`DESIGN.md`](DESIGN.md) | why it is shaped like this, and what three adversarial passes broke |
 | [`examples/demo-plan`](examples/demo-plan) | a runnable three-task plan; T3's gate fails on purpose |
 | [`DELEGATION-NODE.md`](DELEGATION-NODE.md) | the judgement layer: four tiers, and what the node may never decide |
-| [`tests/run-tests.sh`](tests/run-tests.sh) | the calibration harness — crash recovery, the emitter mutex, `verify`, rulings, invariants, token capture, pane reuse and agent memory. `34 passed, 0 failed` |
+| [`tests/run-tests.sh`](tests/run-tests.sh) | the calibration harness — crash recovery, the emitter mutex, `verify`, rulings, invariants, token capture, pane reuse, agent memory, continuity and agent serialisation. `38 passed, 0 failed` |
 
 **Requires** `python3` (stdlib only) and `bash`. `herdr` is **optional** — without it panes are
 unavailable and everything else works. No packages, no daemon, no database.
