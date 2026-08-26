@@ -450,6 +450,33 @@ declaring `**Agent:** recon` inherits `recon`'s pane and `recon`'s entries. Bind
 task or an owned path would break Grillin's own shipped example, where `implementer` appears on
 two tasks — and reuse needs a repeated persona to have anything to reuse.
 
+### 2i · Overlap by default, barrier by declaration
+
+Boundary, not a feature. `smokin tick` dispatches whatever the plan marks ready, every pass
+(§1) — nothing in the routing rule (2b) or the tick loop checks wave membership before
+dispatching. Overlap is not something Smokin adds on top of a serial default; it is what
+happens when nothing says otherwise, because "ready" is the only gate the tick reads. A wave
+(2a; 2c above: *"a tab is a wave"*) groups tasks into one herdr tab for a human to watch — it
+**renders** the phase-4 dependency graph, it does not gate it. Where a stage genuinely needs a
+full stop, that stop is a dependency edge in the plan's own graph, checked by Grillin's
+`check_graph` (`validate-plan.py:563`), not a flag Smokin consults. So there is exactly one
+place a barrier gets declared, and it is not here: Smokin and Grillin must agree that "ready"
+means "the graph says so," or a barrier declared in one reads as overlap permitted by the
+other.
+
+### 2j · Declared budget, measured spend
+
+Boundary. APPETITE — the token/cost budget a plan declares before work starts — is Grillin's:
+stated once, at authoring time, and never touched by anything in this repo. What Smokin owns
+is the opposite half. `smokin_usage.py` totals what a runtime actually reported, read from the
+receipt's `usage` key (§3f) exactly where a runtime chose to print one — the same reading 2h
+above already bounds: *"what the vendor printed on stdout,"* never a bill. Nothing here
+reconciles the two numbers — no check compares a plan's declared APPETITE against
+`smokin_usage.py`'s total, and none is proposed by this design. Note the name collision so it
+is never read as the same field twice: `**Budget:**` in the dispatch fields (2a) is a per-task
+wall-clock timeout in seconds; APPETITE is a cost ceiling for the whole plan. Same word, two
+quantities, two owners.
+
 ---
 
 ## 3 · The completion ping
@@ -1275,6 +1302,15 @@ than solved.
 
 ### Deliberately not solved
 
+- **`smokin memory` is per-plan, and a persona that works several plans fragments.**
+  `.smokin/memory.jsonl` lives under each plan, so an `infra` persona working three
+  tracks of one program has three memories and no recall across them. That is the
+  normal case in a plan-of-plans — consolidating many tasks onto few personas is
+  what makes a persona accumulate anything — so the plan-of-plans feature and the
+  memory feature are in mild tension, and this is the side of it that is not
+  solved. Reported from the first XL-band run, which installed a cross-plan store
+  alongside rather than instead of this one.
+
 - **Correctness.** Smokin proves a task ran, produced artefacts, and passed the gate someone else
   wrote. It does not prove the gate was good. Prior art says gating on the real test suite cut
   breakage ~80%; Smokin can insist the gate ran, never that it was worth running.
@@ -1288,6 +1324,13 @@ than solved.
   8's own rule, Smokin may be named, templated and floored now; it may **not** be recommended by
   `SCALING.json` until those five numbers exist for a real fan-out. Smokin is precisely the
   structured-looking tool that sentence was written about.
+- **Verification method: rerun, and only rerun.** Receipt vs. verdict (§3b; §7 —
+  `VERDICT.json` is written when the tick re-runs the task's own `## Done means` command) is
+  Grillin's **rerun** method: execute the claim, diff the result. **Recompute** (re-derive a
+  figure from its own stated inputs) and **claim-fidelity** (compare a claim against its cited
+  source) are not done-command shapes — no rerun of anything produces either verdict. A plan
+  that needs them needs a reader task: a role staffed by a worker, not a check this tick can
+  run.
 
 ---
 
@@ -1395,3 +1438,10 @@ answer already is.
 - **A plan of people with job titles needs the PLAN.md declaration.** No regex over "Writer A"
   or "the DBA" is ever going to close that, which is why Grillin put the declaration where the
   question is actually asked, and why this reads the declaration instead of guessing.
+- **Gatekeeper lag is observed here, not declared here.** The deadline that should gate a plan
+  is sometimes an earlier approval step, not the nominal end date — that lead time is named at
+  authoring time, in Grillin's APPETITE slot, a declaration. What this layer contributes is the
+  other half: the moment a task parks (above, *"parked, not blocking"*), exit `5` and the
+  `awaiting-human` ledger start counting from **then**, not from whenever someone happens to
+  check — so the wait is visible from the moment it begins instead of only once the nominal
+  deadline is already missed. Nothing here shortens the lag or notifies anyone early.

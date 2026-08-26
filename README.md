@@ -29,6 +29,27 @@ goes and checks the temperature instead of believing it.
 
 Right — barbecue over. Here is the actual tool.
 
+## The one rule the tool enforces on itself
+
+`smokin remember` **refuses an observation that arrives without the command that
+produced it.** Not a warning — a refusal, with the reason written to the ledger.
+
+```
+$ smokin remember <plan> --task T1 --agent infra --claim "the DB is on port 5433"
+smokin: refused: missing observation, command. Every entry carries the task it
+came from, what was observed, and the command that produced it — that triple is
+what lets a later reader disagree with it. Advice with no command behind it
+('be careful with async') is not falsifiable and is not stored.
+```
+
+That is this project's whole epistemology in one subcommand: a claim is not
+evidence until something re-ran it. It is the same rule `verify` applies to a
+worker's receipt, one level down, applied to what the tool itself is told.
+
+It is here on the first screen because a team that had installed a memory system
+*beside* it said this was better than theirs and that they had found it buried in
+`--help`.
+
 ## Do you need this?
 
 | Your situation | Answer |
