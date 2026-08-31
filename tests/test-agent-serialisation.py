@@ -26,7 +26,9 @@ more than the collision it prevents.
     python3 tests/test-agent-serialisation.py
 """
 import json
+import os
 import shutil
+import time
 import subprocess
 import sys
 import tempfile
@@ -47,14 +49,32 @@ def chk(label, got, want):
         fails += 1
 
 
-def plan(name, agents, cap=None):
+SLOW = LAB / "slow.sh"
+
+
+def _slow():
+    """A runtime that outlives the tick that started it.
+
+    NOT `sleep 5`: smokin appends the dispatch line as the last argument, so
+    `sleep` receives a second operand, rejects it and exits immediately — the
+    exact shape S8 warns about, met here by accident. A script ignores extra
+    arguments, which is what any real runtime does.
+    """
+    if not SLOW.exists():
+        SLOW.parent.mkdir(parents=True, exist_ok=True)
+        SLOW.write_text("#!/usr/bin/env bash\nsleep 5\n")
+        SLOW.chmod(0o755)
+    return str(SLOW)
+
+
+def plan(name, agents, cap=None, worktree=None, headless="true"):
     """One task per entry in `agents`, all ready, nothing blocking anything."""
     p = LAB / name
     shutil.rmtree(p, ignore_errors=True)
     (p / ".smokin").mkdir(parents=True)
     rows = "\n".join(f"| T{i+1} | a |" for i in range(len(agents)))
     (p / "PLAN.md").write_text(f"# plan\n\n**Size:** M\n\n| ID | Task |\n|---|---|\n{rows}\n")
-    (p / ".smokin" / "runtimes.json").write_text(json.dumps({"demo": {"headless": "true"}}))
+    (p / ".smokin" / "runtimes.json").write_text(json.dumps({"demo": {"headless": headless}}))
     if cap is not None:
         (p / "SMOKIN.json").write_text(json.dumps({"max_in_flight_per_agent": cap}))
     for i, agent in enumerate(agents, 1):
@@ -63,6 +83,8 @@ def plan(name, agents, cap=None):
         d.joinpath("TASK.md").write_text(
             f"# T{i} — test\n\n**Status:** NOT STARTED\n**Owner:** {agent}\n"
             f"**Agent:** `{agent}`\n"
+            + (f"**Worktree:** {worktree}\n" if worktree else "")
+            +
             f"**Blocked by:** — · **Blocks:** —\n"
             f"**Dispatch:** inproc · **Runtime:** `demo`\n"
             f"**Budget:** 60 · **Interrupt:** no · **Watch:** no\n\n"
@@ -182,6 +204,65 @@ try:
                        capture_output=True, text=True, timeout=60)
     chk("control · a normal launch string gets no such warning",
         "consume it" in (r.stdout + r.stderr), False)
+
+
+    print("\n=== the hazard crosses PLANS, which a per-plan guard cannot see ===")
+    # The per-plan version of this rule looks correct and is not. A plan-of-plans
+    # consolidates many tasks onto few personas — that is what makes a persona
+    # accumulate anything — and those personas span tracks by design: one owned
+    # tasks in three plans at once, one worktree. Each plan ticks separately, so
+    # a guard built from THIS plan's dispatch records is blind to it. Reported by
+    # the program that found the original collision, against the fix for it.
+    wt = LAB / "wt" / "infra"
+    wt.mkdir(parents=True)
+    # A's worker must still be RUNNING when B ticks, or the claim is stale and
+    # releasing it is correct. `true` returns before the next tick starts, which
+    # made the first version of this test assert against its own premise.
+    A = plan("planA", ["infra"], worktree=str(wt), headless=_slow())
+    B = plan("planB", ["infra"], worktree=str(wt), headless=_slow())
+    chk("plan A dispatches", len(dispatched(tick(A))), 1)
+    chk("...and its worker is genuinely still in flight",
+        (A / "tasks" / "T1" / "RECEIPT.json").is_file(), False)
+    outB = tick(B)
+    chk("plan B does NOT — a different plan, the same worktree",
+        len(dispatched(outB)), 0)
+    chk("...and says which resource is busy", "worktree-busy" in outB, True)
+
+    # THE CONTROLS. A guard that never releases, or that catches unrelated
+    # directories, costs more than the collision it prevents.
+    wt2 = LAB / "wt" / "harness"
+    wt2.mkdir(parents=True)
+    C = plan("planC", ["harness"], worktree=str(wt2), headless=_slow())
+    chk("control · a different worktree is unaffected", len(dispatched(tick(C))), 1)
+
+    # RELEASE IS THE PROCESS DYING, NOT A FILE APPEARING. The first version of
+    # this released on a receipt, and that is wrong: the wrapper emits
+    # progressively, so a worker still inside the worktree reports `partial`
+    # within a second and Plan.state() already calls it `claimed`. The claim
+    # would have released while the holder was still writing — the exact
+    # condition it exists to prevent.
+    (A / "tasks" / "T1" / "RECEIPT.json").write_text('{"claim": "done"}')
+    chk("control · a receipt alone does NOT release it — the worker is still there",
+        len(dispatched(tick(B))), 0)
+    # RELEASE IS A TERMINAL STATE, reached the way the tool reaches one: the
+    # holder's done-command starts passing and its own plan takes the verdict.
+    # Nothing here signals a process — tests/test-reuse.py asserts, by parsing
+    # the source, that the tick never probes a pid, and a decision made by
+    # asking the operating system cannot be reproduced from the plan directory.
+    (A / "tasks" / "T1" / "OUT.md").write_text("done\n")
+    # A terminal state needs BOTH: the worker gone and a tick that reaps it.
+    # One tick is not enough and asserting on one was this control's first bug.
+    for _ in range(40):
+        tick(A)
+        if not (A / "tasks" / "T1" / "TASK.md").read_text().count("IN PROGRESS"):
+            break
+        time.sleep(0.25)
+    chk("control · it releases once the holder's task reaches a terminal state",
+        len(dispatched(tick(B))), 1)
+
+    D = plan("planD", ["x"], worktree=str(LAB / "wt" / "never-created"), headless=_slow())
+    chk("control · a worktree that does not exist does not block anything",
+        len(dispatched(tick(D))), 1)
 
 finally:
     shutil.rmtree(LAB, ignore_errors=True)

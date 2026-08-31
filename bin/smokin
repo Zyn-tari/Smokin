@@ -156,6 +156,7 @@ RE_READER = re.compile(r"^\*\*Reader:\*\*\s*([a-z]+)", re.M | re.I)
 # same degradation the common case already takes, since 11 of 20 shipped
 # TASK.md declare no `**Agent:**` at all.
 RE_AGENT_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+RE_WORKTREE_T = re.compile(r"\*\*Worktree:\*\*\s*(.+?)\s*$", re.M | re.I)
 
 # WHO IS A PERSON — AND THE ANSWER IS GRILLIN'S, NOT OURS. Grillin's gate already
 # decides this (`is_human_owned` in scripts/validate-plan.py) because two of its
@@ -247,6 +248,12 @@ PANE_CEILING = {"XS": 0, "S": 1, "M": 3, "L": 5, "XL": 5}
 # be what a subscription-billed budget wants — the correct behaviour for git and
 # the affordable one are the same behaviour.
 AGENTS_IN_FLIGHT_DEFAULT = 1
+
+# States in which nobody is working in the task's directory any more. Anything
+# else — ready, blocked, running, claimed — means a worker may still be inside
+# it, and `claimed` is the one that matters: a partial receipt arrives while the
+# worker is still writing.
+TERMINAL_STATES = frozenset({"verified", "refuted", "rejected"})
 DEFAULT_BUDGET = 900
 
 
@@ -313,6 +320,11 @@ class Task:
         self.agent = (self.agent_declared
                       if RE_AGENT_OK.match(self.agent_declared) else "")
         self.reader = field(RE_READER, t).strip().lower()
+        # THE DIRECTORY, because that is what git actually excludes on. Grillin's
+        # worktree-disjoint reads the same field; this is the runtime half.
+        self.worktree = field(RE_WORKTREE_T, t).strip().strip("`").rstrip("/")
+        if self.worktree.startswith("<") or not self.worktree:
+            self.worktree = ""          # an unfilled template placeholder is not one
         # Set from this file alone. `Plan` widens it afterwards when PLAN.md
         # declares human workers — a plan-level declaration cannot be seen from
         # inside one task, and guessing at job titles is what Grillin already
@@ -1133,6 +1145,80 @@ def persona_argv(row: dict, plan: "Plan", t: "Task"):
     return shlex.split(out)
 
 
+# A LOCK THAT LIVES IN THE DIRECTORY IT PROTECTS.
+#
+# The per-plan version of this rule looks correct and is not, and it was shipped
+# that way. A plan-of-plans consolidates many tasks onto few personas — that is
+# what makes a persona accumulate anything — and those personas span tracks by
+# design: one owned tasks in three plans at once. Each plan ticks separately, so
+# a guard built from THIS plan's dispatch records cannot see the persona already
+# working in another plan's tick, and the collision it was written to stop
+# happens anyway. Reported by the program that found the original.
+#
+# So the claim is keyed on the WORKTREE and stored inside it. The exclusion git
+# enforces is on the directory — one checked-out branch, one index.lock — so a
+# marker in that directory is visible to every plan that dispatches into it,
+# with no shared registry and no program-level runtime to invent. It is the same
+# design as the rest of this tool: the fact lives on disk, where anyone can read
+# it, and a crash leaves it readable rather than lost.
+#
+# Staleness is decided by evidence, not by a timeout: the claim names the task
+# folder that took it, and a claim whose task has emitted a RECEIPT.json — or
+# whose folder is gone — is finished and may be taken.
+WORKTREE_CLAIM = ".smokin-worktree-claim.json"
+
+
+def worktree_holder(wt: str):
+    """Who currently holds this worktree, or None if it is free or finished.
+
+    DECIDED FROM FILES, LIKE EVERY OTHER DECISION HERE. Two earlier versions of
+    this were wrong in opposite directions and both are worth recording.
+
+    The first released the claim as soon as the holder's task had a RECEIPT.json,
+    reasoning that a receipt means finished. It does not: the wrapper emits
+    progressively, so a worker still inside the worktree writes a `partial`
+    receipt within the first second. The claim released while the holder was
+    still writing — the exact condition it exists to prevent.
+
+    The second tested the holding process with `os.kill(pid, 0)`. That reads the
+    world correctly and is still wrong here: `tests/test-reuse.py` asserts, by
+    parsing this source, that nothing in the tick signals or probes a pid. The
+    rule is not squeamishness about signals — it is that a decision made by
+    asking the operating system cannot be reproduced from the plan directory
+    afterwards, and everything else in this tool can be.
+
+    So the question is the one the tool already answers: has the holding task
+    reached a state where nobody is working in that directory? `Plan.state()` is
+    the single source of truth for that, and it says `claimed` — not finished —
+    while a partial receipt sits beside a live worker.
+    """
+    try:
+        rec = json.loads((Path(wt) / WORKTREE_CLAIM).read_text())
+    except (OSError, ValueError):
+        return None
+    root = Path(rec.get("plan", ""))
+    if not Path(rec.get("task_dir", "")).is_dir() or not root.is_dir():
+        return None                      # the plan it belonged to is gone
+    try:
+        st = Plan(root).state(rec.get("task"))
+    except Exception:
+        # A claim we cannot evaluate is kept, not discarded. Holding a worktree
+        # too long costs a tick of latency; releasing one too early costs two
+        # branches in one directory, which is silent.
+        return rec
+    return None if st in TERMINAL_STATES else rec
+
+
+def claim_worktree(wt: str, plan: "Plan", t: "Task", where=""):
+    try:
+        (Path(wt) / WORKTREE_CLAIM).write_text(json.dumps(
+            {"plan": str(plan.root), "task": t.id, "task_dir": str(t.dir),
+             "agent": t.agent or None, "at": now(),
+             "where": str(where or "")}, indent=1) + "\n")
+    except OSError:
+        pass                             # a worktree we cannot write to is not ours
+
+
 def sh(argv, timeout=20):
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -1884,6 +1970,19 @@ def tick(plan: Plan, dry=False, close_panes=False):
         if decision == "pane" and live_panes >= ceiling:
             queued.append((tid, "pane-ceiling"))
             continue
+        # THE WORKTREE FIRST, because it is the only one of the two that sees
+        # across plans. A persona guard built from this plan's dispatch records
+        # cannot know the same persona is already working in another plan.
+        if t.worktree:
+            holder = worktree_holder(t.worktree)
+            if holder and holder.get("task_dir") != str(t.dir):
+                queued.append((tid, f"worktree-busy:{t.worktree}"))
+                ledger(plan, event="held-worktree-busy", task=tid,
+                       agent=t.agent or None, worktree=t.worktree,
+                       holder_plan=holder.get("plan"), holder_task=holder.get("task"),
+                       why="a git worktree holds one checked-out branch, and this "
+                           "one is claimed by a task that has not finished")
+                continue
         if t.agent and in_flight_by_agent.get(t.agent, 0) >= agent_cap:
             # Held, not failed. The next tick takes it, exactly as if it had been
             # blocked — which, by git's rules, it was.
@@ -1905,6 +2004,8 @@ def tick(plan: Plan, dry=False, close_panes=False):
             live_panes += 1
         if t.agent:
             in_flight_by_agent[t.agent] = in_flight_by_agent.get(t.agent, 0) + 1
+        if t.worktree:
+            claim_worktree(t.worktree, plan, t, where)
         # NOT ON A DRY RUN. launch() returns before it touches anything a worker
         # would see, and says so in a comment one line down — then this ran
         # anyway and flipped the status of every task the dry run considered.
