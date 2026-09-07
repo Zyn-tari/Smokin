@@ -351,6 +351,36 @@ reused agent is a continued session, and the plan's own gate requires it to be f
 two-line findings file passes `test -f` with zero real work done. This is Grillin's principle 8 —
 never certify your own work — applied one level down, to the worker certifying its own completion.
 
+#### "Delete your verification instructions" does not mean delete this
+
+Anthropic's guidance for the Claude 5 generation says to strip explicit verification instructions
+out of prompts: *"Claude Opus 5 verifies its own work without being told to... instructions like
+these cause over-verification... removing them reduces wasted tokens with no loss in quality."*
+Read quickly, that sounds like it retires this whole tool. It does not, and the reason is the
+table above.
+
+**That guidance is about prompts. This is not a prompt.** *"Double-check your answer"* is text
+sent to a model, which the model pays for in tokens and may or may not act on. A verdict is
+`subprocess.run` executing the task's own done-command and reading the exit code. It costs zero
+prompt tokens, it does not depend on the model's cooperation, and it produces the same answer
+whether the worker is diligent, tired, lying, or dead. Nothing in the guidance touches it, and
+nothing in it could.
+
+What the guidance actually endorses is the thing this tool exists to provide. From the same body
+of advice: *give Claude a way to verify its work* — the single most emphasised item in Anthropic's
+best-practices page for Claude Code. A done-command **is** that way, and a verdict is somebody
+else running it.
+
+So the split holds, and the reading to be careful of is the opposite one: a model that verifies
+its own work unprompted produces MORE confident receipts, not fewer. A receipt has never been
+worth more than the mechanism that checks it, and it is worth slightly less now.
+
+**Where the guidance did land** is one line in Grillin's task template. Its converge loop read
+*do → verify → fix → confirm the fix → re-verify*, which asks the worker to re-read its own
+output twice; those two steps now name the done-command, which is what they always meant. The
+`confirm the fix, by someone who did not make it` step is untouched, because a different reader
+judging a result is what the guidance recommends rather than what it removes.
+
 ### Where to run it — pane or in-process
 
 First match wins:

@@ -316,6 +316,14 @@ else
   cat "$LAB/agentser.out"
 fi
 
+if python3 "$ROOT/tests/test-calibration-and-caps.py" > "$LAB/calib.out" 2>&1; then
+  n=$(count_pass "$LAB/calib.out")
+  ok "calibration & caps: $n checks on the file and the environment a worker gets"
+else
+  bad "calibration and caps" "see below"
+  cat "$LAB/calib.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

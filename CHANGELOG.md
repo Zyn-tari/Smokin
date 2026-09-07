@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — Claude 5 · 2026-09-07
+
+Two mechanisms, added together because they answer the same question from opposite ends: **what
+does a worker get, beyond the words in its task file?** 39 checks in the harness, up from 38.
+
+**Nothing about verification changed, and that is the entry.** Anthropic's guidance for this model
+generation says to strip explicit verification instructions out of prompts because Opus 5 already
+verifies its own work. That guidance is about prompts; a verdict is `subprocess.run` executing a
+done-command and reading an exit code. It costs zero prompt tokens and produces the same answer
+whether the worker is diligent, tired, lying or dead. The reading to be careful of is the
+opposite one: **a model that verifies its own work unprompted produces more confident receipts,
+not fewer.** A receipt has never been worth more than the mechanism that checks it, and it is
+worth slightly less now. Written up under README § "Receipt vs verdict".
+
+### The calibration file reaches the worktree
+
+Grillin authors `tasks/<ID>/CLAUDE.md` — how to behave, as opposed to TASK.md's what to do. It is
+authored in the task folder where the gate can see it and **read** from the worktree, which is a
+different directory. Only a dispatch knows both paths. `place_calibration` copies it, and:
+
+- **It refuses to clobber.** A worktree is a checkout of a real repository which may have its own
+  `CLAUDE.md`. Overwriting it would be invisible — same name, same place, different instructions
+  — so a destination without this tool's marker is left alone and the refusal goes on the record.
+- **It overwrites its own marked copy without asking**, because a persona's worktree persists
+  across that persona's tasks and stale calibration is worse than none: specific, plausible, wrong.
+- Skipped on a dry run, for the same reason `MEMORY.md` is.
+
+### A runtimes row may carry `env`
+
+The only place in this tool that names a vendor's environment variables — same rule as the launch
+strings: a runtime is a row, not a code path. It exists because `Do NOT spawn sub-agents` sat in
+Grillin's task template as a line nothing could check, and the shipped defaults it was up against
+are higher than anyone expects: read out of the installed bundle (2.1.263),
+`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` falls back to **20** and
+`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` to **3**.
+
+The shipped `claude` row sets concurrency 2, depth 1, six per session, and pins subagents to
+`claude-sonnet-5` via `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`. Those four numbers are a **judgment,
+not a measurement**, and the row says so; depth 1 is the load-bearing one, because it lets a task
+fan out once and stops the fan-out from fanning out.
+
+> **A dispatch inherits the operator's environment.** `env = dict(os.environ, ...)`, so a worker
+> receives whatever the shell that ran `smokin tick` was carrying, and the same plan run from two
+> different shells is two different plans. The row is an **override**, not a set-from-nothing.
+> This was found by the test written to prove the opposite — the session running it had
+> `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2` exported — and it is now asserted in both directions.
+
+Keys are validated against `^[A-Z][A-Z0-9_]*$`, values shell-quoted where the pane path builds a
+command, and a key that fails is dropped and **named** on the dispatch record. The record
+publishes key names only: a value can be a token, and a dispatch record is readable by anyone who
+can read the plan.
+
+---
+
 ## The policy, before the entries
 
 **Do not update Smokin while a plan is running.**

@@ -955,6 +955,15 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
                # consumer can tell "no persona declared" from "old smokin".
                SMOKIN_AGENT=t.agent or "")
 
+    # THE RUNTIME'S OWN VARIABLES, LAST, so a row can set what this tool does
+    # not know about — the subagent caps among them. Deliberately after the
+    # SMOKIN_* keys and deliberately not able to overwrite them by accident:
+    # RE_ENVKEY admits any uppercase name, so a row COULD name SMOKIN_PLAN, and
+    # the dispatch record below publishes exactly which keys were applied so
+    # that a row doing something surprising is visible rather than mysterious.
+    renv, renv_dropped = runtime_env(row)
+    env.update(renv)
+
     rec = {"run": rid, "seq": seq, "task": t.id, "attempt": 1,
            "dispatch": decision, "clause": clause, "runtime": t.runtime,
            "started": now(), "started_ns": time.time_ns(),
@@ -971,6 +980,17 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            # this task was handed, and "which past did it start from" belongs
            # beside "which pane did it run in".
            "memory": rec_note,
+           # WHICH ENVIRONMENT VARIABLES THE RUNTIME ROW APPLIED. Names only —
+           # a value can be a token and a dispatch record is read by anyone who
+           # can read the plan. The names alone answer the question this is here
+           # for: whether the caps that were supposed to be in force actually
+           # were, on this dispatch, for this task.
+           "env": sorted(renv),
+           "env_dropped": renv_dropped or None,
+           # WHERE THE CALIBRATION FILE ENDED UP, or why nowhere. Filled in
+           # after the dry return, so a dry run reports null and has still
+           # touched nothing.
+           "calibration": None,
            # WHICH AGENT INSTANCE got this task. The gate can only check that an
            # adversarial task DECLARES a different owner; only something that
            # dispatched can know who actually ran it. inproc spawns a fresh
@@ -1006,6 +1026,22 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
         ledger(plan, event="memory-recall", task=t.id, agent=t.agent or None,
                n=0, why=rec_note["why"])
 
+    # AFTER the dry return, for the same reason MEMORY.md is: a dry run's whole
+    # promise is that it writes its own record and touches nothing a worker would
+    # see, and the worktree is the most visible place there is.
+    rec["calibration"] = calib = place_calibration(plan, t)
+    if calib.get("placed"):
+        ledger(plan, event="calibration-placed", task=t.id, agent=t.agent or None,
+               path=calib["path"],
+               note="how to behave, read from the worktree; TASK.md is still what to do")
+    elif calib.get("path"):
+        # Only worth a ledger line when there WAS a destination and the copy did
+        # not happen — a refusal to clobber, or a worktree that cannot be written
+        # to. "no CLAUDE.md in the task folder" is the ordinary case and saying
+        # so on every dispatch would bury the two that matter.
+        ledger(plan, event="calibration-not-placed", task=t.id, agent=t.agent or None,
+               path=calib["path"], why=calib["why"])
+
     wrapper = str(HERE / "smokin-run")
     write_rec = lambda: (plan.priv / "dispatch" / f"{t.id}.json").write_text(
         json.dumps(rec, indent=1) + "\n")
@@ -1027,7 +1063,11 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
              # {WT} stays because runtimes.json files in the field use it.
                       .replace("{WT}", str(plan.root))
                      .replace("{LINE}", shlex.quote(line)))
-        cmd = (f"SMOKIN_PLAN={plan.root} SMOKIN_EMIT={HERE/'smokin-emit'} "
+        # QUOTED, unlike the two SMOKIN_* assignments beside them, which this
+        # file has always written bare. These values come from a runtimes row
+        # rather than from this file, and a row is edited by hand in the field.
+        renv_prefix = "".join(f"{k}={shlex.quote(v)} " for k, v in sorted(renv.items()))
+        cmd = (f"{renv_prefix}SMOKIN_PLAN={plan.root} SMOKIN_EMIT={HERE/'smokin-emit'} "
                f"bash {wrapper} {t.id} -- {inner}")
 
         # Decided from files, before anything is asked of the world. The answer
@@ -1165,6 +1205,98 @@ def persona_argv(row: dict, plan: "Plan", t: "Task"):
 # Staleness is decided by evidence, not by a timeout: the claim names the task
 # folder that took it, and a claim whose task has emitted a RECEIPT.json — or
 # whose folder is gone — is finished and may be taken.
+# ── the calibration file ────────────────────────────────────────────────────
+# `tasks/<ID>/CLAUDE.md` is Grillin's calibration file: how to behave, as
+# opposed to TASK.md's what to do. It carries the four things that stopped being
+# free in the Claude 5 generation — response length, narration cadence, scope,
+# delegation — and it is named CLAUDE.md for one mechanical reason: a harness
+# auto-loads that name from its working directory and auto-loads nothing else.
+#
+# WHICH IS WHY THE RUNNER HAS TO MOVE IT. The file is authored in the task
+# folder, where the gate can see it and a cold reader can find it. It is READ
+# from the worktree, which is somewhere else entirely. Nothing but a dispatch
+# knows both paths, so nothing but a dispatch can join them.
+CALIBRATION = "CLAUDE.md"
+CALIB_MARK = "<!-- smokin:calibration"
+
+
+def place_calibration(plan: "Plan", t: "Task"):
+    """Copy tasks/<ID>/CLAUDE.md to the worktree root, or say why not.
+
+    IT REFUSES TO CLOBBER. A worktree is a checkout of somebody's real
+    repository and that repository may have its own CLAUDE.md — the project's
+    standing instructions, checked in, nothing to do with this plan. Overwriting
+    it would be the single most damaging thing this function could do, and it
+    would be invisible: the file would still be there, still be named the same,
+    and say something else. So a destination that exists without this tool's
+    marker is left exactly as it is and the refusal is recorded. The plan is
+    then wrong about where its calibration will be read from, which is a fact
+    somebody needs, and a silent overwrite would have hidden it.
+
+    IT OVERWRITES ITS OWN COPY WITHOUT ASKING. A persona's worktree persists
+    across that persona's tasks — that is the whole reason to keep one per
+    persona — so the previous task's calibration is sitting there when the next
+    one starts. Leaving it would hand task N+1 the calibration written for task
+    N, which is worse than handing it none: it would be specific, plausible and
+    wrong.
+
+    Returns a record for the dispatch, never raises. A worktree that cannot be
+    written to is a fact to report, not a reason to stop dispatching.
+    """
+    src = t.dir / CALIBRATION
+    if not t.worktree:
+        return {"placed": False, "why": "the task declares no worktree"}
+    if not src.is_file():
+        return {"placed": False, "why": f"no {CALIBRATION} in the task folder"}
+    dst = Path(t.worktree) / CALIBRATION
+    try:
+        if dst.exists() and CALIB_MARK not in dst.read_text(errors="replace")[:512]:
+            return {"placed": False, "path": str(dst),
+                    "why": "a CLAUDE.md this tool did not write is already there — "
+                           "left alone; it may be the project's own"}
+        dst.write_text(
+            f"{CALIB_MARK} placed for {t.id} from {src}. Rewritten on every dispatch\n"
+            f"     into this worktree — edit the source, not this copy. -->\n"
+            + src.read_text(errors="replace"))
+        return {"placed": True, "path": str(dst)}
+    except OSError as e:
+        return {"placed": False, "path": str(dst),
+                "why": f"{type(e).__name__}: {e}"}
+
+
+# ── the runtime's environment ───────────────────────────────────────────────
+# A runtime row may carry an `env` block, and it is the only place in this tool
+# where a vendor's environment variables are named — same rule as the launch
+# strings: a runtime is a row, not a code path.
+#
+# WHAT IT IS FOR. Some rules cannot survive as prose. "Do NOT spawn sub-agents"
+# sat in Grillin's task template for a year as a line nothing could check, in
+# the file with the least room for one. Claude Code exposes real caps for it,
+# and a cap in the environment is enforcement rather than advice — which is the
+# same argument this tool already makes about receipts and verdicts, applied one
+# level earlier. Grillin's own principle 11 says a rule a machine cannot check
+# is a preference; this is how one stops being a preference.
+#
+# KEYS ARE VALIDATED. The block is operator-authored rather than plan-authored,
+# so it is not the injection surface the persona field was, but the pane path
+# still interpolates these into a shell command and a value with a space in it
+# would arrive as two words. Keys must look like environment variables and
+# values are shell-quoted at the point of use. A key that does not match is
+# dropped and named, never silently applied.
+RE_ENVKEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def runtime_env(row: dict):
+    """The `env` block from a runtimes row, validated. Returns (kept, dropped)."""
+    kept, dropped = {}, []
+    for k, v in (row.get("env") or {}).items():
+        if RE_ENVKEY.match(str(k)) and isinstance(v, (str, int)) and not isinstance(v, bool):
+            kept[str(k)] = str(v)
+        else:
+            dropped.append(str(k))
+    return kept, dropped
+
+
 WORKTREE_CLAIM = ".smokin-worktree-claim.json"
 
 

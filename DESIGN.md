@@ -479,6 +479,60 @@ quantities, two owners.
 
 ---
 
+### 2k · The calibration file, and the caps behind it
+
+Two mechanisms that landed together because they answer the same question from opposite ends:
+**what does a worker get, beyond the words in its task file?**
+
+**The file.** Grillin's `tasks/<ID>/CLAUDE.md` says how a worker should behave — response length,
+narration cadence, scope, delegation. `TASK.md` beside it says what to do. They are separate
+because they answer different questions, and the calibration file is named `CLAUDE.md` for one
+mechanical reason: a harness auto-loads that name from its working directory and auto-loads
+nothing else. Everything else has to be read on request, and Grillin's own principle 11 says a
+rule that has to be requested is a preference.
+
+That creates a join no single component can make. The file is **authored** in the task folder,
+because that is where the gate can see it and where a cold reader looks. It is **read** from the
+worktree, which is a different directory entirely. Only a dispatch knows both paths, so the
+dispatch copies it, and `place_calibration` is that copy.
+
+It refuses to clobber, and that refusal is the load-bearing part. A worktree is a checkout of
+somebody's real repository, and that repository may have its own `CLAUDE.md` — checked in,
+standing instructions, nothing to do with this plan. Overwriting it would be the most damaging
+thing this function could do and it would be **invisible**: same name, same place, different
+instructions. So a destination without this tool's marker is left exactly as it is and the
+refusal goes on the dispatch record. Its own marked copy it replaces without asking, because a
+persona's worktree persists across that persona's tasks and leaving the previous task's
+calibration would hand this one something specific, plausible and wrong.
+
+**The caps.** A runtimes row may carry an `env` block, and it is the only place in this tool that
+names a vendor's environment variables — the same rule as the launch strings: a runtime is a row,
+not a code path.
+
+It exists because some rules cannot survive as prose. `Do NOT spawn sub-agents` sat in Grillin's
+task template as a line nothing could check, in the file with the least room for one. Read out of
+the installed bundle (`@anthropic-ai/claude-code` 2.1.263), `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`
+falls back to **20** and `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` to **3** — so a plan that says
+nothing gets twenty concurrent subagents, each able to spawn two levels further, and a Claude 5
+generation model delegates more readily than its predecessors. No amount of prose changes that
+number. A row does.
+
+> **A dispatch inherits the operator's environment, and the row is an override rather than a
+> set-from-nothing.** `env = dict(os.environ, ...)`, so a worker receives whatever the shell that
+> ran `smokin tick` was carrying — including caps the operator set for their own session and
+> never thought about. The same plan run from two different shells is then two different plans.
+> This was found by the test that was written to prove the opposite, and the dispatch record's
+> `env` list is the only place a reader can see which of the two won. Names only: a value can be
+> a token, and a dispatch record is readable by anyone who can read the plan.
+
+Keys are validated against `^[A-Z][A-Z0-9_]*$` and values are shell-quoted where the pane path
+builds a command. The block is operator-authored rather than plan-authored, so it is not the
+injection surface `**Agent:**` turned out to be — but the pane path still interpolates it into a
+shell, and a key that does not match is dropped and **named** on the record rather than silently
+applied.
+
+---
+
 ## 3 · The completion ping
 
 The requester's fourth item: *instead of the orchestrator talking to each pane, a background ping
