@@ -324,6 +324,14 @@ else
   cat "$LAB/calib.out"
 fi
 
+if python3 "$ROOT/tests/test-doctor-fix.py" > "$LAB/doctorfix.out" 2>&1; then
+  n=$(count_pass "$LAB/doctorfix.out")
+  ok "doctor --fix: $n checks on the one repair, and the refusals"
+else
+  bad "doctor --fix" "see below"
+  cat "$LAB/doctorfix.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

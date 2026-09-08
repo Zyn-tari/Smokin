@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — `doctor --fix` · 2026-09-08
+
+**One repair, and the refusals are the design.** `--fix` was carried for a while as
+a general repair for whatever doctor reports. Almost nothing doctor reports is
+repairable by editing a file: a declared runtime that is not installed needs a
+binary (a `--fix` that shelled out to a package manager would be the most dangerous
+line in this repository), a launch string ending in a variadic flag needs to know
+what the author meant to put last, and the filesystem and herdr lines are facts
+about the host. All three are refused in `doctor_fix`'s docstring so the question
+is closed rather than re-asked.
+
+What it does fix is a gap **this repository created yesterday**. `load_runtimes`
+takes the first candidate file that exists and does not merge, so a plan shipping
+its own `.smokin/runtimes.json` gets nothing from the shipped table — including the
+`env` block — and silently runs on Claude Code's own defaults of 20 concurrent
+subagents at spawn depth 3. A plan with no runtimes.json of its own was never
+affected: it falls through to the template and gets the caps for free.
+
+- `doctor` warns on any cappable row with no `env`, naming the real defaults and
+  the no-merge rule that caused it. Detection reads the launch string, not the row
+  name, so a claude row called `impl` is not uncapped by accident.
+- `--fix` copies the block from the shipped table **read at run time**, so it
+  cannot drift from what a fresh plan would inherit. Backs up to
+  `runtimes.json.bak`, reports what it changed, and goes in the ledger.
+- Idempotent, refuses a lone task, and leaves a runtime this tool has no opinion
+  about entirely alone rather than inventing caps for it.
+
+`tests/test-doctor-fix.py`, 26 checks. The four values are read from the template
+rather than restated, because a test that hardcoded them would pass on the day
+somebody changed it and be wrong about what a fresh plan inherits.
+
+
 ## Unreleased — Claude 5 · 2026-09-07
 
 Two mechanisms, added together because they answer the same question from opposite ends: **what

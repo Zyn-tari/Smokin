@@ -2568,7 +2568,29 @@ def write_progress(plan: Plan, st: dict):
 
 # ── doctor ──────────────────────────────────────────────────────────────────
 
-def doctor(plan: Plan):
+# Which runtimes have caps worth checking for. A row is only missing something
+# if there is something for it to be missing: this tool has no opinion about a
+# runtime whose vendor exposes no caps, and inventing one would be the price
+# table CONTRIBUTING refuses.
+CAPPABLE = ("claude",)
+
+
+def _uncapped(name: str, row: dict):
+    """True when this row could carry caps and does not.
+
+    WHY IT IS WORTH A LINE OF ITS OWN. `load_runtimes` takes the FIRST candidate
+    file that exists and does not merge, so a plan that ships its own
+    `.smokin/runtimes.json` gets NOTHING from the shipped template — including
+    the `env` block added on 2026-09-07. Such a plan silently runs on Claude
+    Code's own defaults, which are 20 concurrent subagents at spawn depth 3, and
+    nothing anywhere says so. A plan with no runtimes.json of its own is already
+    fine: it falls through to the template and gets the block for free.
+    """
+    head = (row.get("headless") or "") + " " + (row.get("pane") or "")
+    return (not row.get("env")) and any(c in head or c == name for c in CAPPABLE)
+
+
+def doctor(plan: Plan, fix: bool = False):
     rts = runtimes(plan)
     out = {"at": now(), "runtimes": {}, "host": {}}
     for name, row in rts.items():
@@ -2583,6 +2605,8 @@ def doctor(plan: Plan):
             # .../read tasks/H1/TASK.md and follow it". Cheap to check, and the
             # only place anyone would look after seeing that message.
             "swallows_dispatch_line": bool(head) and head[-1] in VARIADIC_FLAGS,
+            "uncapped": _uncapped(name, row),
+            "env": sorted((row.get("env") or {}).keys()),
             "persona_flag": bool(row.get("persona_flag"))}
     out["host"] = {
         "herdr": bool(shutil.which("herdr")), "inside_herdr": os.environ.get("HERDR_ENV") == "1",
@@ -2610,16 +2634,95 @@ def doctor(plan: Plan):
         print(f"runtime   {mark}{n:<12} headless={'y' if r['headless'] else 'n'} "
               f"pane={'y' if r['pane'] else 'n'}"
               f"{'  persona=y' if r.get('persona_flag') else ''}")
+        if r.get("uncapped"):
+            print(f"          WARNING   {n} declares no `env` block, so this plan runs on "
+                  f"the vendor's own subagent defaults — 20 concurrent at spawn "
+                  f"depth 3, read out of claude-code 2.1.263. `load_runtimes` takes "
+                  f"the first file that exists and does not merge, so a plan with "
+                  f"its own runtimes.json gets none of the shipped caps. "
+                  f"`smokin doctor --fix {plan.root}` adds them.")
         if r.get("swallows_dispatch_line"):
             print(f"          WARNING   {n}'s launch string ends in a variadic flag. "
                   f"Smokin appends the dispatch line last, so that flag will "
                   f"consume it and the runtime will report the instruction as a "
                   f"missing file. Put a non-list argument last.")
+    if fix:
+        return doctor_fix(plan, out)
+
     missing = [n for n, r in out["runtimes"].items() if not r["installed"]]
     if missing:
         print(f"\n{len(missing)} runtime(s) declared and not installed: {', '.join(missing)}.")
         print("Learn it here, not from a gate that passed because a missing binary")
         print("exits 127 and looks like a clean failure.")
+    return 0
+
+
+def doctor_fix(plan: Plan, report: dict):
+    """Add the shipped caps to a plan's own runtimes.json. Nothing else.
+
+    WHAT THIS DELIBERATELY WILL NOT DO, because `--fix` was originally proposed
+    as a general repair and almost nothing doctor reports is repairable by
+    editing a file:
+
+      a runtime declared and not installed   installing a binary is not this
+                                             tool's business, and a `--fix` that
+                                             shelled out to a package manager
+                                             would be the most dangerous line in
+                                             the repository
+      a launch string ending in a variadic   the repair needs to know what the
+        flag                                 author meant to put last. Guessing
+                                             produces a launch string that runs
+                                             and is wrong, which is worse than
+                                             one that fails loudly
+      a plan under /mnt, herdr absent        facts about the host, not defects
+
+    So one repair, and it exists because a change in this repository created the
+    gap rather than because a user asked: rows that predate the `env` block get
+    the vendor's defaults with nothing saying so.
+
+    IT BACKS UP FIRST and it never invents values. The block written is the one
+    in the shipped template, read at run time — so this cannot drift from what a
+    fresh plan would inherit, which is the whole property that makes the repair
+    safe to apply unattended.
+    """
+    dst = plan.priv / "runtimes.json"
+    if not dst.is_file():
+        print(f"\nnothing to fix: {plan.root} ships no runtimes.json of its own, so it "
+              f"already inherits the shipped table — caps included.")
+        return 0
+    want = [n for n, r in report["runtimes"].items() if r.get("uncapped")]
+    if not want:
+        print("\nnothing to fix: every cappable runtime already declares an `env` block.")
+        return 0
+    tpl = U.load_runtimes([HERE.parent / "templates" / "runtimes.json"], strict=True)
+    try:
+        raw = json.loads(dst.read_text())
+    except (OSError, ValueError) as e:
+        print(f"\nsmokin: cannot fix {dst} — {e}", file=sys.stderr)
+        return 2
+    changed = []
+    for n in want:
+        block = (tpl.get(n) or {}).get("env")
+        if not block:
+            # The template has no caps for this runtime either. Nothing to copy,
+            # and inventing a block here is exactly what the docstring refuses.
+            print(f"          skipped {n}: the shipped table declares no env for it either")
+            continue
+        raw.setdefault(n, {})["env"] = dict(block)
+        changed.append(n)
+    if not changed:
+        print("\nnothing to fix: no shipped caps exist for the uncapped runtimes.")
+        return 0
+    bak = dst.with_suffix(".json.bak")
+    bak.write_text(dst.read_text())
+    dst.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
+    print(f"\nfixed {len(changed)} runtime(s): {', '.join(sorted(changed))}")
+    for n in sorted(changed):
+        print(f"          {n}: {', '.join(sorted(raw[n]['env']))}")
+    print(f"          previous file kept at {bak}")
+    print(f"          re-formatted as 2-space JSON; diff it before committing.")
+    ledger(plan, event="doctor-fix", runtimes=sorted(changed),
+           note="env caps copied from the shipped table; previous file kept as .bak")
     return 0
 
 
@@ -2907,6 +3010,12 @@ def main():
                          "reuse returns to")
     ap.add_argument("--run", default=None)
     ap.add_argument("--task", default=None, help="verify: gate one task instead of all")
+    ap.add_argument("--fix", action="store_true",
+                    help="doctor: add the shipped subagent caps to this plan's own "
+                         "runtimes.json. The ONLY repair doctor performs — a missing "
+                         "binary cannot be installed by editing a file, and a launch "
+                         "string ending in a variadic flag needs to know what the "
+                         "author meant. Backs up to runtimes.json.bak first")
     ap.add_argument("--recapture", action="store_true",
                     help="invariants: take a new baseline. Deliberate, and it goes in the ledger")
     # `remember`. `--task` is shared with `verify` on purpose — it means the same
@@ -2965,7 +3074,11 @@ def main():
         return 2
 
     if a.cmd == "doctor":
-        return doctor(plan)
+        if a.fix and getattr(plan, "single", False):
+            print("smokin: --fix needs a plan directory — a lone task has no "
+                  "runtimes.json to repair.", file=sys.stderr)
+            return 2
+        return doctor(plan, fix=a.fix)
     if a.cmd == "reset":
         return reset(plan, a.run)
     if a.cmd == "rulings":
