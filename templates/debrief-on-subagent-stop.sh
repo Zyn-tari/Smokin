@@ -21,9 +21,24 @@ if [ "${SMOKIN_DEBRIEF:-1}" = "0" ] || [ -n "${SMOKIN_DEBRIEF_ACTIVE:-}" ]; then
 fi
 payload="$(cat 2>/dev/null || true)"
 
-# Beside the `smokin` on PATH — that is how it was installed, and it keeps the
-# hook from depending on a second PATH entry nobody added.
-bin="$(command -v smokin-debrief 2>/dev/null || true)"
+# STOP FIRES AT THE END OF EVERY TURN IN EVERY SESSION, the user's own included.
+# Only a Smokin-dispatched worker's Stop is debriefed, and that is decided HERE,
+# in the shell, before anything is spawned — installed globally, this runs on
+# every turn-end on the machine, and a python process per turn to decide "no"
+# is a cost somebody pays for nothing.
+if [ -z "${SMOKIN_TASK_ID:-}" ] && \
+   printf '%s' "$payload" | grep -q '"hook_event_name"[[:space:]]*:[[:space:]]*"Stop"'; then
+  exit 0
+fi
+
+# WHERE THE DEBRIEF LIVES. An explicit SMOKIN_DEBRIEF_BIN wins, because a hook
+# runs with whatever PATH the session had, and a `smokin` that is not on it
+# would make this hook silently do nothing — the worst thing a hook can do.
+# Found installing it on the machine it was written on, where exactly that
+# was true.
+bin="${SMOKIN_DEBRIEF_BIN:-}"
+[ -n "$bin" ] && [ ! -x "$bin" ] && bin=""
+[ -n "$bin" ] || bin="$(command -v smokin-debrief 2>/dev/null || true)"
 if [ -z "$bin" ] && command -v smokin >/dev/null 2>&1; then
   cand="$(dirname "$(readlink -f "$(command -v smokin)")")/smokin-debrief"
   [ -x "$cand" ] && bin="$cand"

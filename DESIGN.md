@@ -539,6 +539,11 @@ applied.
 > `subagent_model_env`, which `subagent_model()` fills per dispatch from the persona file's
 > `model:` or the task's **Model:**. The pin follows the persona, and escalating a model is a
 > change to the task's contract rather than a helper quietly spawned on a bigger one.
+>
+> The same day, the worker itself stopped running on the runtime's default: `model_flag` in the
+> row (`--model {MODEL}`) launches it on that same resolved model, so a persona's worker and its
+> helpers cannot disagree about which model the persona is. The dispatch record's
+> `worker_model` says what was applied, the way `pairing_enforced` does for a ruling.
 
 ---
 

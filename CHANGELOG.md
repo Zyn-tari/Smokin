@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — the worker runs on its persona's model · 2026-09-11
+
+Decided by the user the same day as the pin: the persona's model governs the worker, not only
+its helpers. `{MODEL}` used to be substituted in `judge` alone, and the runtimes table recorded
+every worker's pairing as "REQUESTED and not applied" — honest, and once subagents were pinned
+it meant a Haiku persona was Opus doing the work with Haiku helpers.
+
+- **`model_flag`** in a runtimes row (`"--model {MODEL}"` for claude) is appended to `headless`
+  before the dispatch line, and `{MODEL_FLAG}` in `pane` expands to it. The model is resolved
+  once — persona file `model:`, else the task's **Model:** — and the same value launches the
+  worker and pins its subagents, so the two cannot disagree. No model means no flag, never an
+  empty `--model`; a non-identifier is not passed; a row with no `model_flag` passes nothing, and
+  the dispatch record's new `worker_model` says which of those happened.
+- `doctor` counts a claude row without `model_flag` as incomplete, and `--fix` copies it.
+- **`doctor --fix` no longer clobbers.** It assigned `env` unconditionally, so a row with
+  customised caps that was only missing the pin key would have had its caps replaced with the
+  shipped ones. Each key is now copied only when it is missing.
+- **The debrief hook, installed on the machine it was written on, would have done nothing.**
+  `smokin` was not on PATH, so the hook found no `smokin-debrief` and exited 0 — silently.
+  `SMOKIN_DEBRIEF_BIN` now names it and wins. And since it is installed globally and Stop fires
+  at every turn-end in every session, a Stop outside a Smokin dispatch is dropped in the shell
+  before anything is spawned.
+
+`tests/test-subagent-pin-and-integration.py` 34 → 43 checks; 41 passed.
+
+
 ## Unreleased — the pin, the merge, the debrief · 2026-09-11
 
 **A correction first, because it matters most.** The 2026-09-07 entry below says the shipped

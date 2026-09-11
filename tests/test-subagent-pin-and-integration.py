@@ -147,6 +147,41 @@ try:
         (rec_of(P)["subagent_model"]["model"],
          "inherit" in rec_of(P)["subagent_model"]["source"]), (None, True))
 
+    print("\n=== 1c · the worker runs on the persona's model too ===")
+    ARGV = LAB / "argvdump.sh"
+    ARGV.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$SMOKIN_TASK_DIR/ARGV.txt"\n')
+    ARGV.chmod(0o755)
+    WROW = {"headless": str(ARGV), "model_flag": "--model {MODEL}"}
+    args = lambda p: (p / "tasks" / "T1" / "ARGV.txt").read_text().splitlines()
+    P = plan("w-task", {"T1": {"model": "claude-haiku-4-5", "agent": "impl"}}, WROW)
+    smokin("tick", str(P))
+    a = args(P)
+    chk("the worker is launched with --model <the task's model>",
+        a[a.index("--model") + 1] if "--model" in a else None, "claude-haiku-4-5")
+    chk("...before the dispatch line, which stays last",
+        "--model" in a and a.index("--model") < len(a) - 2, True)
+    chk("...and the record says what the worker ran on",
+        rec_of(P)["worker_model"], {"model": "claude-haiku-4-5", "source": "task **Model:**"})
+    P = plan("w-persona", {"T1": {"model": "claude-sonnet-5", "agent": "impl"}}, WROW)
+    (P / "_personas").mkdir()
+    (P / "_personas" / "impl.md").write_text("---\nmodel: opus\n---\n")
+    smokin("tick", str(P))
+    a = args(P)
+    chk("the persona file's alias reaches the worker, as it reaches the subagents",
+        a[a.index("--model") + 1] if "--model" in a else None, "opus")
+    P = plan("w-none", {"T1": {"agent": "impl"}}, WROW)
+    smokin("tick", str(P))
+    chk("CONTROL · no model: no flag at all, never an empty --model", "--model" in args(P), False)
+    P = plan("w-norow", {"T1": {"model": "claude-haiku-4-5"}}, {"headless": str(ARGV)})
+    smokin("tick", str(P))
+    chk("a row with no model_flag passes nothing, and the record says why",
+        ("--model" in args(P), "no model_flag" in rec_of(P)["worker_model"]["source"]),
+        (False, True))
+    P = plan("w-evil", {"T1": {"model": "opus;touch-x", "agent": "impl"}}, WROW)
+    smokin("tick", str(P))
+    chk("a value that is not a model identifier never reaches the argv",
+        any("touch-x" in x for x in args(P)[:-1]), False)
+
     print("\n=== 2 · every task verified is not complete while a branch is unmerged ===")
     P = plan("unmerged", {"T1": {"branch": "`feat/a`"}})
     rc, out = run_to_rest(P)
@@ -271,6 +306,34 @@ try:
     h = subprocess.run(["bash", str(HOOK)], input=hpay, capture_output=True, text=True,
                        timeout=30, env=dict(henv, SMOKIN_DEBRIEF_ACTIVE="1"))
     chk("the hook itself refuses to fire inside a summariser", h.returncode, 0)
+
+    # FOUND INSTALLING IT: `smokin` was not on PATH on the machine it was written
+    # on, so the hook would have found no smokin-debrief and silently done
+    # nothing. SMOKIN_DEBRIEF_BIN is the escape, and it must work with no PATH
+    # help at all.
+    bdir = LAB / "bindir"
+    benv = {k: v for k, v in henv.items() if k != "SMOKIN_TASK_DIR"}
+    benv.update({"PATH": "/usr/bin:/bin", "SMOKIN_DEBRIEF_BIN": str(DEBRIEF),
+                 "SMOKIN_TASK_DIR": str(bdir), "SMOKIN_DEBRIEF_CMD": str(FAKE),
+                 "FAKE_SAW": str(LAB / "saw2.txt")})
+    subprocess.run(["bash", str(HOOK)], input=hpay, capture_output=True, text=True,
+                   timeout=30, env=benv)
+    for _ in range(20):
+        if (bdir / "debriefs").exists() and any((bdir / "debriefs").glob("*.md")):
+            break
+        time.sleep(0.5)
+    chk("SMOKIN_DEBRIEF_BIN finds the debrief with nothing on PATH",
+        len(list((bdir / "debriefs").glob("*.md"))) if (bdir / "debriefs").exists() else 0, 1)
+
+    sdir = LAB / "stopdir"
+    senv = dict(benv, SMOKIN_TASK_DIR=str(sdir))
+    senv.pop("SMOKIN_TASK_ID", None)
+    t0 = time.time()
+    subprocess.run(["bash", str(HOOK)], capture_output=True, text=True, timeout=30, env=senv,
+                   input=json.dumps({"hook_event_name": "Stop", "transcript_path": str(tr)}))
+    time.sleep(1.5)
+    chk("a Stop in the user's own session is dropped in the shell — nothing spawned, nothing written",
+        (sdir / "debriefs").exists(), False)
 
     print("\n=== 3d · doctor says when the debrief prerequisite is missing ===")
     home = LAB / "home"

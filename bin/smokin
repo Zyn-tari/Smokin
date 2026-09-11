@@ -978,7 +978,21 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     # the dispatch record below publishes exactly which keys were applied so
     # that a row doing something surprising is visible rather than mysterious.
     renv, renv_dropped = runtime_env(row)
-    sm, sm_src = subagent_model(plan, t)
+    # THE PERSONA'S MODEL, resolved once and used twice: the worker is launched
+    # on it (model_argv) and its subagents are pinned to it (below). One source,
+    # so the two can never disagree about which model a persona is.
+    pm, pm_src = subagent_model(plan, t)
+    wargv = model_argv(row, pm)
+    if wargv:
+        worker_model = {"model": pm, "source": pm_src}
+    elif pm and not RE_MODEL_OK.match(pm):
+        worker_model = {"model": None, "source": f"refused {pm!r}: not a model identifier"}
+    elif pm:
+        worker_model = {"model": None, "source": "this runtime row names no model_flag — the "
+                                                 "worker runs on the runtime's own default"}
+    else:
+        worker_model = {"model": None, "source": pm_src}
+    sm, sm_src = pm, pm_src
     pin_key = row.get("subagent_model_env")
     if sm and pin_key and RE_ENVKEY.match(str(pin_key)) and RE_MODEL_OK.match(sm):
         renv[pin_key] = sm
@@ -1016,6 +1030,9 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            # "what did the helpers run on" is the first question after a cost
            # surprise.
            "subagent_model": {"model": sm, "source": sm_src},
+           # WHAT THE WORKER ITSELF WAS LAUNCHED ON. Until 2026-09-11 the answer
+           # was always "the runtime's default" and nothing said so.
+           "worker_model": worker_model,
            "env_dropped": renv_dropped or None,
            # WHERE THE CALIBRATION FILE ENDED UP, or why nowhere. Filled in
            # after the dry return, so a dry run reports null and has still
@@ -1092,6 +1109,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
              # any error. {PLAN_ROOT} is the name that describes the value;
              # {WT} stays because runtimes.json files in the field use it.
                       .replace("{WT}", str(plan.root))
+                     .replace("{MODEL_FLAG}", " ".join(shlex.quote(a) for a in wargv))
                      .replace("{LINE}", shlex.quote(line)))
         # QUOTED, unlike the two SMOKIN_* assignments beside them, which this
         # file has always written bare. These values come from a runtimes row
@@ -1159,7 +1177,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
     # The persona flag goes BEFORE the dispatch line, which is always last.
     argv = (["bash", wrapper, t.id, "--"] + head.split()
-            + persona_argv(row, plan, t) + [line])
+            + persona_argv(row, plan, t) + wargv + [line])
     p = subprocess.Popen(argv, cwd=str(plan.root), env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -1213,6 +1231,30 @@ def persona_argv(row: dict, plan: "Plan", t: "Task"):
     out = (tmpl.replace("{PERSONA_FILE}", shlex.quote(str(pfile)))
                .replace("{PERSONA}", shlex.quote(t.agent)))
     return shlex.split(out)
+
+
+def model_argv(row: dict, model):
+    """The optional `model_flag` row, expanded with the persona's model, or [].
+
+    THE WORKER USED TO RUN ON WHATEVER THE RUNTIME DEFAULTED TO. `{MODEL}` was
+    substituted in `judge` and nowhere else, and this file's own runtimes table
+    recorded the task's pairing as "REQUESTED and not applied". Honest, and on
+    2026-09-11 it stopped being acceptable: once a task's subagents were pinned
+    to the persona's model, a "Haiku persona" meant Opus doing the work with
+    Haiku helpers — declared one way, run another, which is the defect class
+    this tool exists to refuse. Decided by the user the same day: the persona's
+    model governs the worker too.
+
+    Same shape as persona_argv, for the same reasons. The row says HOW a model
+    reaches the runtime (`"model_flag": "--model {MODEL}"`), so no vendor flag
+    lives in this file. With no model there is no flag — an empty `--model` is
+    a broken argument, and launching on the default is better than launching
+    with one. A value that is not a model identifier is not passed at all.
+    """
+    tmpl = (row or {}).get("model_flag")
+    if not tmpl or not model or not RE_MODEL_OK.match(model):
+        return []
+    return shlex.split(tmpl.replace("{MODEL}", shlex.quote(model)))
 
 
 # A LOCK THAT LIVES IN THE DIRECTORY IT PROTECTS.
@@ -2708,7 +2750,8 @@ def _uncapped(name: str, row: dict):
     # Two keys since 2026-09-11: the caps (`env`), and the name of the variable
     # that carries a task's model to its subagents (`subagent_model_env`). A row
     # with caps and no pin key still lets every worker's helpers inherit.
-    return ((not row.get("env") or not row.get("subagent_model_env"))
+    return ((not row.get("env") or not row.get("subagent_model_env")
+             or not row.get("model_flag"))
             and any(c in head or c == name for c in CAPPABLE))
 
 
@@ -2856,10 +2899,17 @@ def doctor_fix(plan: Plan, report: dict):
             # and inventing a block here is exactly what the docstring refuses.
             print(f"          skipped {n}: the shipped table declares no env for it either")
             continue
-        raw.setdefault(n, {})["env"] = dict(block)
-        pin = (tpl.get(n) or {}).get("subagent_model_env")
-        if pin:
-            raw[n]["subagent_model_env"] = pin
+        # EACH KEY ONLY IF IT IS MISSING. The first version of this assigned
+        # `env` unconditionally, so a row that had customised its caps and was
+        # only missing the pin key would have had its caps replaced with the
+        # shipped ones — a repair that silently reverts somebody's decision.
+        row_ = raw.setdefault(n, {})
+        trow = tpl.get(n) or {}
+        if not row_.get("env"):
+            row_["env"] = dict(block)
+        for k in ("subagent_model_env", "model_flag"):
+            if trow.get(k) and not row_.get(k):
+                row_[k] = trow[k]
         changed.append(n)
     if not changed:
         print("\nnothing to fix: no shipped caps exist for the uncapped runtimes.")
