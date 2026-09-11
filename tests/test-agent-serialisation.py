@@ -124,8 +124,21 @@ try:
     P = plan("release", ["infra-builder", "infra-builder"])
     first = dispatched(tick(P))
     chk("tick 1 dispatches one", len(first), 1)
-    # the demo runtime is `true`, so the first task is finished; satisfy its gate
+    # THE PREMISE, ESTABLISHED RATHER THAN ASSUMED. This read "the demo runtime
+    # is `true`, so the first task is finished" and went straight to tick 2. It
+    # is `true`, but it runs DETACHED, and "almost at once" is not "before tick
+    # 2 looks". Under the full suite's load the receipt landed after tick 2 had
+    # read the persona as still in flight, and the check below failed — once in
+    # a real run on 2026-09-11, and 0 times in 6 isolated runs on this commit and
+    # the one before it. A race in the test, not in the tool. So wait for the
+    # receipt the comment claimed was already there.
     done = first[0]
+    rcpt = P / "tasks" / done / "RECEIPT.json"
+    for _ in range(60):
+        if rcpt.exists():
+            break
+        time.sleep(0.25)
+    chk("...and its receipt has landed before tick 2 looks", rcpt.exists(), True)
     (P / "tasks" / done / "OUT.md").write_text("done\n")
     out2 = tick(P)
     chk("tick 2 takes the one that was held",

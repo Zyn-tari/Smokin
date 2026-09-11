@@ -22,6 +22,10 @@ floor was a declaration nothing applied: the same shape as the model, one field 
 
 Pin, merge & debrief harness 43 → 53 checks.
 
+The one suite failure seen on the way — "tick 2 takes the one that was held" — was a race in
+`test-agent-serialisation.py`, not in the tool: it assumed a detached `true` runtime had
+finished before tick 2 and never waited. It now waits for the first task's `RECEIPT.json`.
+
 
 ## Unreleased — the worker runs on its persona's model · 2026-09-11
 
