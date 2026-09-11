@@ -332,6 +332,14 @@ else
   cat "$LAB/doctorfix.out"
 fi
 
+if python3 "$ROOT/tests/test-subagent-pin-and-integration.py" > "$LAB/pin.out" 2>&1; then
+  n=$(count_pass "$LAB/pin.out")
+  ok "pin, merge & debrief: $n checks on what a finished session is owed"
+else
+  bad "pin, merge and debrief" "see below"
+  cat "$LAB/pin.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

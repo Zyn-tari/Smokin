@@ -152,19 +152,26 @@ try:
     chk("...and the record says nothing was placed", rec["calibration"], None)
 
     print("\n=== 6 · PROBE · the runtime's env reaches the process ===")
+    # FORCE IS A SWITCH. This section used to put `claude-sonnet-5` in it and
+    # assert that string reached the child — which it did, and which proved
+    # nothing: the bundle only tests FORCE for being set, and reads the model
+    # from CLAUDE_CODE_SUBAGENT_MODEL. A test of delivery is not a test of
+    # effect. The pin itself is tested in test-subagent-pin-and-integration.py.
     P = plan("env", env={"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
-                         "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "claude-sonnet-5"},
+                         "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+                         "SMOKIN_TEST_SECRET": "s3cr3t-value"},
              headless=str(DUMP))
     rec = tick(P)
     got = (P / "tasks" / "T1" / "ENV.txt").read_text()
     chk("the cap is in the child's environment",
         "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1" in got, True)
-    chk("...and so is the forced subagent model",
-        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE=claude-sonnet-5" in got, True)
+    chk("...and so is the FORCE switch",
+        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1" in got, True)
     chk("the dispatch record publishes the KEYS", rec["env"],
-        ["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"])
+        ["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+         "SMOKIN_TEST_SECRET"])
     chk("...and never the values — a record is readable by anyone who can read the plan",
-        "claude-sonnet-5" in json.dumps(rec), False)
+        "s3cr3t-value" in json.dumps(rec), False)
 
     print("\n=== 7 · CONTROL · a row with no env block sets nothing of its own ===")
     P = plan("noenv", headless=str(DUMP))

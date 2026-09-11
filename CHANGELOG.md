@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased — the pin, the merge, the debrief · 2026-09-11
+
+**A correction first, because it matters most.** The 2026-09-07 entry below says the shipped
+`claude` row pins subagents to `claude-sonnet-5` via `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`. It did
+not. Read out of the installed bundle, FORCE is only ever tested for being *set* — it removes the
+Agent tool's `model` parameter — and the model name comes from `CLAUDE_CODE_SUBAGENT_MODEL`, which
+the row never set. For four days every worker's subagents inherited their parent's model while
+the row said Sonnet. The test asserted the string reached the child environment, which proves
+delivery and nothing about effect. That entry stays as written; this is the record of it being
+wrong.
+
+### The subagent model is pinned per task, from the persona
+
+FORCE is now `1`, the switch it is. The row names the variable that carries a model —
+`subagent_model_env`, still the only place a vendor's variable is named — and Smokin fills it
+per dispatch: the persona file's `model:` first, the task's **Model:** second. A Haiku persona's
+helpers run on Haiku and an Opus persona's on Opus, and neither can ask for another; escalating
+is a change to the contract, where it is visible. The dispatch record says what was pinned and
+from where. A value that is not a model identifier is refused rather than exported, and a row
+with no pin key pins nothing and says so. `doctor` treats a cappable row without the key as
+uncapped; `--fix` copies both.
+
+### "Every task verified" is not "complete" while a branch is unmerged
+
+`tick` and `status` both return `5` — at rest, waiting on a person — when every task has
+verified but a declared **Branch:** has no `**Kind:** integration` task downstream. Every contract
+says "Do NOT merge", so in that state all of the work is still on branches, and "complete" is
+what an operator reads as "it landed". Decided from TASK.md fields alone, no git call. A merge
+done by hand is recorded as a person-owned integration task, because the plan cannot see a merge
+nobody told it about. Grillin's `check_integration` is the gate's half; this is for the plan
+that arrives without passing through it.
+
+### Every finished agent is debriefed
+
+Asked for directly. `bin/smokin-debrief` and `templates/debrief-on-subagent-stop.sh`: every
+subagent and fan-out agent that finishes is summarised by `claude-haiku-4-5` into four sections
+— **Key points of success** · **Unfinished business, marked defects or failures** · **Important
+notes** · **Full chat workflow flaws** — in the task's `debriefs/` folder, or beside the
+transcript when there is no task. Wired to SubagentStop always, and to Stop only inside a Smokin
+dispatch — never the user's own session.
+
+- **Never blocks.** The hook reads its payload, starts the debrief detached, and exits: measured
+  under 2 s while a 4 s summariser ran.
+- **Never recurses.** The summariser runs with `SMOKIN_DEBRIEF_ACTIVE` set, and both the hook and
+  the script check it first.
+- **Never fails silently.** A summariser error still writes the file, saying why.
+- **A note, not a verdict** — SUSPECTED, grading nothing. `doctor` warns when no settings file
+  wires the hook, because a prerequisite nothing reports is a preference.
+
+The first live run debriefed the research agent that started this change — a 1.6 MB transcript,
+27 s on Haiku — and found the same two gaps in that run that were found by hand. It also marked
+"did not spot-check its own report" as a workflow flaw, which is the self-verification Claude 5
+retires; the prompt now says declining to re-check finished work is not a flaw, while acting on
+something never checked still is.
+
+41 passed in the harness, up from 40. `tests/test-subagent-pin-and-integration.py`, 34 checks.
+
+
 ## Unreleased — `doctor --fix` · 2026-09-08
 
 **One repair, and the refusals are the design.** `--fix` was carried for a while as

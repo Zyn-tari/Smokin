@@ -531,6 +531,15 @@ injection surface `**Agent:**` turned out to be — but the pane path still inte
 shell, and a key that does not match is dropped and **named** on the record rather than silently
 applied.
 
+> **Corrected 2026-09-11 — the model pin.** This section's first version, and the row, said
+> `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=claude-sonnet-5` pinned every subagent to Sonnet. Read out of
+> the bundle, FORCE is only tested for being set — it removes the Agent tool's `model` parameter —
+> and the model comes from `CLAUDE_CODE_SUBAGENT_MODEL`, which was never set, so subagents
+> inherited their parent's model for four days. FORCE is now `1`, and the row names
+> `subagent_model_env`, which `subagent_model()` fills per dispatch from the persona file's
+> `model:` or the task's **Model:**. The pin follows the persona, and escalating a model is a
+> change to the task's contract rather than a helper quietly spawned on a bigger one.
+
 ---
 
 ## 3 · The completion ping
@@ -1455,7 +1464,8 @@ Every one of those is an edit somebody else authorises. This document authorises
 `smokin run` exists so an operator can start the fleet and walk away. That only means
 something if the loop stops for the right reasons and does not stop for the wrong ones, so
 every terminal reading is a separate exit code: `0` complete, `3` stuck, `4` halted, `5`
-waiting on a person. `1` — in flight — is the only one that continues the loop.
+waiting on a person — which includes verified branches no integration task merges. `1` — in
+flight — is the only one that continues the loop.
 
 **A person's task is never dispatched.** Who counts as a person is *Grillin's* decision, not
 ours: its gate has needed the answer since v1.0.0 because two of its checks pull in opposite

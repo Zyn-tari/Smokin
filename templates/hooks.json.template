@@ -23,7 +23,19 @@
     "the file. Other tools put hooks there too, and overwriting them is a silent",
     "removal of somebody else's safety net.",
     "",
-    "TURN IT OFF without unwiring: SMOKIN_VERIFY_ON_STOP=0"
+    "TURN IT OFF without unwiring: SMOKIN_VERIFY_ON_STOP=0",
+    "",
+    "THE DEBRIEF (debrief-on-subagent-stop.sh + bin/smokin-debrief). Every subagent and",
+    "fan-out agent that finishes is summarised by claude-haiku-4-5 into four sections --",
+    "Key points of success / Unfinished business, marked defects or failures / Important",
+    "notes / Full chat workflow flaws -- written into the task's debriefs/ folder, or",
+    "beside the transcript when there is no task. A model that did not do the work writes",
+    "it, so it has no stake in the result; it lands SUSPECTED and grades nothing.",
+    "Detached, so it never blocks; guarded, so the summariser's own finish is not",
+    "debriefed; and on Stop it fires only inside a Smokin dispatch, never your session.",
+    "INSTALL: cp templates/debrief-on-subagent-stop.sh ~/.claude/hooks/ && chmod +x it,",
+    "then merge BOTH the SubagentStop block and the second Stop entry.",
+    "OFF without unwiring: SMOKIN_DEBRIEF=0"
   ],
   "hooks": {
     "Stop": [
@@ -33,6 +45,22 @@
             "type": "command",
             "command": "~/.claude/hooks/verify-on-stop.sh",
             "timeout": 90
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/debrief-on-subagent-stop.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/debrief-on-subagent-stop.sh",
+            "timeout": 10
           }
         ]
       }

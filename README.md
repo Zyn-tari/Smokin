@@ -105,7 +105,8 @@ gated behind authoring a plan directory first, at the exact moment nobody wants 
 ```bash
 mkdir -p ~/.claude/hooks && cp templates/verify-on-stop.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/verify-on-stop.sh
-# then merge templates/hooks.json.template into your settings.json
+cp templates/debrief-on-subagent-stop.sh ~/.claude/hooks/ && chmod +x ~/.claude/hooks/debrief-on-subagent-stop.sh
+# then merge templates/hooks.json.template into your settings.json — both hooks, Stop and SubagentStop
 ```
 
 Now the moment an agent says it has finished, its own done-command is re-run and you are told
@@ -279,7 +280,7 @@ separate exit code, because your next move is different in each:
 | `0` | complete | every task verified |
 | `3` | stuck | nothing running, nothing ready. Something is wrong |
 | `4` | halted | an invariant broke, or a ruling said stop. Read it |
-| `5` | waiting on a person | only with `--no-wait`. **Nothing is wrong** |
+| `5` | waiting on a person | only with `--no-wait`. **Nothing is wrong** — a person's task, an open question, or verified branches that no integration task merges |
 
 **The loop does not end because a person is needed.** A worker that hits a decision it may not
 make writes `tasks/<ID>/QUESTIONS.md`. You answer by putting `ANSWER.md` beside it — that file
@@ -505,11 +506,13 @@ you cannot reconstruct it from the plan directory, it does not exist.
 | [`bin/smokin`](bin/smokin) | the tick — reap, drain, gate, dispatch, render |
 | [`bin/smokin-run`](bin/smokin-run) | the wrapper. Forks, never `exec`s; traps `EXIT HUP TERM INT` |
 | [`bin/smokin-emit`](bin/smokin-emit) | the single emitter — `O_EXCL` mutex, atomic publish |
+| [`bin/smokin-debrief`](bin/smokin-debrief) | the debrief — a Haiku summary of a finished session, four fixed sections, marked SUSPECTED, grades nothing |
 | [`SMOKIN.json`](SMOKIN.json) | machine-readable spec. Hand it to an agent |
 | [`templates/_SMOKIN.md.template`](templates/_SMOKIN.md.template) | the substrate contract a plan copies in |
 | [`templates/runtimes.json`](templates/runtimes.json) | the capability table — the only file that knows a vendor's flags |
 | [`templates/verify-on-stop.sh`](templates/verify-on-stop.sh) | **the hook.** Re-runs the gate the moment an agent claims done. Never blocks, always exits 0 |
-| [`templates/hooks.json.template`](templates/hooks.json.template) | the wiring for it — merge into settings.json, do not replace |
+| [`templates/debrief-on-subagent-stop.sh`](templates/debrief-on-subagent-stop.sh) | **the other hook.** Hands a finished subagent's or worker's transcript to Haiku, detached. Never blocks, never recurses, never debriefs your own session |
+| [`templates/hooks.json.template`](templates/hooks.json.template) | the wiring for both — merge into settings.json, do not replace |
 | [`EXPERIMENTS.md`](EXPERIMENTS.md) | the three experiments the design was blocked on, with commands and output |
 | [`DESIGN.md`](DESIGN.md) | why it is shaped like this, and what three adversarial passes broke |
 | [`examples/demo-plan`](examples/demo-plan) | a runnable three-task plan; T3's gate fails on purpose |

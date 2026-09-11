@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""smokin-debrief — a four-section debrief of one agent's session, by a model that did not do it.
+
+    smokin-debrief --from-hook [--payload-file F]        (a Claude Code hook payload on stdin or in F)
+    smokin-debrief --transcript PATH [--out DIR] [--agent-id ID] [--agent-type TYPE]
+
+WHY. Asked for directly: every subagent and every fan-out agent that finishes gets
+its session summarised, by a consistent cheap model, into four sections —
+
+    Key points of success
+    Unfinished business, marked defects or failures
+    Important notes
+    Full chat workflow flaws
+
+Two properties are the point, and both come from WHO writes it. The summariser did
+not do the work, so it has no stake in the work looking finished — an agent
+summarising its own session is the self-report this whole tool exists to distrust.
+And it is the same model every time, so a hundred debriefs are comparable with each
+other in a way a hundred self-reports never are.
+
+WHAT IT IS NOT. It is not a verdict. A verdict is the task's own done-command run by
+somebody else; a debrief is a model's reading of a transcript, and it lands marked
+SUSPECTED. Nothing grades a task on it.
+
+WHAT IT REFUSES, each for a reason:
+  · recursing — the summariser is itself an agent, and its own finish would ask for
+    a debrief of the debrief. SMOKIN_DEBRIEF_ACTIVE is set for it and checked first.
+  · the main session — a hook on Stop fires for YOUR session too. Stop is debriefed
+    only inside a Smokin dispatch (SMOKIN_TASK_ID set), where the session IS a
+    fan-out agent; SubagentStop always is.
+  · failing silently — if the summariser errors or times out, the file is still
+    written, saying so. An absent debrief and a failed one must not look the same.
+
+WHERE. Into the task's own folder when there is one — $SMOKIN_TASK_DIR/debriefs/ —
+so each task keeps its rules, its contract and its outputs in one place; otherwise
+beside the transcript it summarises.
+
+TUNING:
+  SMOKIN_DEBRIEF=0              off, without unwiring the hook
+  SMOKIN_DEBRIEF_CMD="…"        the summariser (default: claude -p --model claude-haiku-4-5)
+  SMOKIN_DEBRIEF_MAX_CHARS=N    transcript budget (default 120000)
+  SMOKIN_DEBRIEF_TIMEOUT=S      seconds (default 300)
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SECTIONS = ("Key points of success",
+            "Unfinished business, marked defects or failures",
+            "Important notes",
+            "Full chat workflow flaws")
+DEFAULT_CMD = "claude -p --model claude-haiku-4-5 --output-format text"
+
+# THE LAST CLAUSE OF THE FOURTH SECTION WAS BOUGHT BY THE FIRST LIVE RUN. On
+# 2026-09-11 a debrief marked "did not spot-check its own report file before
+# reporting" as a workflow flaw — which is the self-verification the Claude 5
+# guidance retires. A debrief people act on would have pushed agents straight
+# back into it. Unchecked assumptions stay a flaw; unrequested re-reading does not.
+#
+# Short on purpose. The Claude 5 guidance is that over-instruction costs quality,
+# and this model is summarising, not deciding. What it needs: the four headings,
+# the evidence rule, and what the fourth section means — the one reading of it
+# that would otherwise drift toward product defects.
+PROMPT = """Write a debrief of one AI agent's working session, from its transcript below.
+
+Write exactly these four Markdown sections, in this order, and nothing else:
+
+## Key points of success
+## Unfinished business, marked defects or failures
+## Important notes
+## Full chat workflow flaws
+
+Use only what the transcript shows, and name the concrete thing - a file, a command, an error line - rather than characterising it. Where a section has nothing, write "None found."
+
+"Full chat workflow flaws" means problems in HOW the work was done: wasted or repeated steps, assumptions acted on without checking, instructions not followed, scope drift. Not defects in the product, and not "did not re-read its own finished output" - acting on something never checked is a flaw; declining to re-check finished work is not.
+
+<transcript>
+{body}
+</transcript>
+"""
+
+
+def condense(path: Path, budget: int) -> str:
+    """A Claude Code JSONL transcript, reduced to what a reader needs; else raw text.
+
+    Kept: what the user asked, what the agent said, which tools it called and on
+    what, and the head of each tool result. Dropped: thinking, and the bulk of
+    tool output — a debrief is about what happened, and the full output of every
+    `cat` would spend the whole budget on the first three steps.
+    """
+    raw = path.read_text(errors="replace")
+    out = []
+    for line in raw.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role") or rec.get("type") or "?"
+        content = msg.get("content")
+        if isinstance(content, str):
+            out.append(f"[{role}] {content}")
+            continue
+        for b in content or []:
+            if not isinstance(b, dict):
+                continue
+            k = b.get("type")
+            if k == "text" and b.get("text"):
+                out.append(f"[{role}] {b['text']}")
+            elif k == "tool_use":
+                arg = json.dumps(b.get("input", {}), ensure_ascii=False)[:240]
+                out.append(f"[{role} → {b.get('name', 'tool')}] {arg}")
+            elif k == "tool_result":
+                c = b.get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+                flag = " ERROR" if b.get("is_error") else ""
+                out.append(f"[result{flag}] {str(c or '')[:400]}")
+    text = "\n".join(out) if out else raw          # not Claude-shaped: take it as it is
+    if len(text) <= budget:
+        return text
+    # Both ends matter: the start says what was asked, the end says what came of
+    # it. The middle is where a session repeats itself.
+    head = int(budget * 0.2)
+    return (text[:head] + f"\n\n[… {len(text) - budget} characters elided …]\n\n"
+            + text[-(budget - head):])
+
+
+def shape(body: str) -> str:
+    """Guarantee the four headings, in order. A missing one is said, not guessed."""
+    out = body.strip()
+    for h in SECTIONS:
+        if not re.search(rf"^##\s+{re.escape(h)}\s*$", out, re.M | re.I):
+            out += f"\n\n## {h}\n\n_(the summariser returned nothing for this section)_"
+    return out + "\n"
+
+
+def debrief(transcript: Path, out_dir: Path, agent_id: str, agent_type: str) -> Path:
+    cmd = os.environ.get("SMOKIN_DEBRIEF_CMD", DEFAULT_CMD)
+    budget = int(os.environ.get("SMOKIN_DEBRIEF_MAX_CHARS", "120000"))
+    timeout = int(os.environ.get("SMOKIN_DEBRIEF_TIMEOUT", "300"))
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    safe = lambda s: re.sub(r"[^A-Za-z0-9._-]+", "-", s or "")[:48].strip("-")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"{stamp}-{safe(agent_type) or 'agent'}-{safe(agent_id) or 'session'}.md"
+    header = (f"# Debrief — {agent_type or 'agent'} {agent_id or ''}".rstrip() + "\n\n"
+              f"> Written by `{cmd}` from `{transcript}` at "
+              f"{datetime.datetime.now().isoformat(timespec='seconds')}.\n"
+              f"> A model that did not do the work summarised it: SUSPECTED until "
+              f"somebody checks it against the transcript.\n\n")
+    try:
+        r = subprocess.run(shlex.split(cmd), input=PROMPT.format(body=condense(transcript, budget)),
+                           capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, SMOKIN_DEBRIEF_ACTIVE="1"))
+        if r.returncode != 0 or not r.stdout.strip():
+            why = (r.stderr or "no output").strip().splitlines()[-1:] or ["no output"]
+            body = f"> **The summariser failed** (exit {r.returncode}): {why[0][:300]}\n"
+        else:
+            body = shape(r.stdout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        body = f"> **The summariser could not run**: {type(e).__name__}: {e}\n"
+    dest.write_text(header + body)
+    return dest
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--from-hook", action="store_true")
+    ap.add_argument("--payload-file")
+    ap.add_argument("--transcript")
+    ap.add_argument("--out")
+    ap.add_argument("--agent-id", default="")
+    ap.add_argument("--agent-type", default="")
+    a = ap.parse_args()
+
+    if os.environ.get("SMOKIN_DEBRIEF", "1") == "0" or os.environ.get("SMOKIN_DEBRIEF_ACTIVE"):
+        return 0                                    # off, or the summariser's own finish
+    agent_id, agent_type = a.agent_id, a.agent_type
+    if a.from_hook:
+        try:
+            src = Path(a.payload_file).read_text() if a.payload_file else sys.stdin.read()
+            payload = json.loads(src or "{}")
+        except (OSError, ValueError):
+            return 0
+        finally:
+            if a.payload_file:
+                Path(a.payload_file).unlink(missing_ok=True)
+        event = payload.get("hook_event_name", "")
+        if event == "Stop" and not os.environ.get("SMOKIN_TASK_ID"):
+            return 0                                # the user's own session, not a fan-out
+        if event not in ("Stop", "SubagentStop"):
+            return 0
+        tpath = payload.get("agent_transcript_path") or payload.get("transcript_path")
+        agent_id = agent_id or payload.get("agent_id") or os.environ.get("SMOKIN_TASK_ID", "")
+        agent_type = (agent_type or payload.get("agent_type")
+                      or ("worker" if event == "Stop" else "subagent"))
+    else:
+        tpath = a.transcript
+    if not tpath:
+        return 0
+    transcript = Path(tpath).expanduser()
+    for _ in range(10):                             # the file may still be flushing
+        if transcript.is_file():
+            break
+        time.sleep(0.5)
+    if not transcript.is_file():
+        return 0
+    if a.out:
+        out = Path(a.out)
+    elif os.environ.get("SMOKIN_TASK_DIR"):
+        out = Path(os.environ["SMOKIN_TASK_DIR"]) / "debriefs"
+    else:
+        out = transcript.parent / "debriefs"
+    print(debrief(transcript, out, agent_id, agent_type))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

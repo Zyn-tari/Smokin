@@ -121,6 +121,10 @@ RE_BUDGET = RE_FIELD("Budget")
 RE_INTERRUPT = RE_FIELD("Interrupt")
 RE_WATCH = RE_FIELD("Watch")
 RE_TYPE = RE_FIELD("Type")
+# The merge half of the graph. Grillin's check_integration reads the same two
+# fields; this is the runtime half — see unintegrated_branches().
+RE_BRANCH = RE_FIELD("Branch")
+RE_KIND = RE_FIELD("Kind")
 # WHO the plan says is doing the work, as distinct from who is accountable for
 # it. Grillin's validator says it in a comment beside its own regex: "`**Owner:**`
 # is who is accountable. `**Agent:**` is the PERSONA." Smokin read `Owner` and
@@ -348,6 +352,18 @@ class Task:
         except ValueError:
             self.budget = DEFAULT_BUDGET
         self.done_cmd = done_command(self.path)
+        # WHAT THIS TASK PRODUCES THAT SOMEBODY MUST MERGE, and whether it is the
+        # task that does. An unfilled template value — `<prefix>/<ID>-<slug>` —
+        # is not a branch, by the same angle-bracket rule Grillin applies.
+        b = field(RE_BRANCH, t).strip().strip("`").strip()
+        self.branch = "" if (not b or b in ("—", "-") or ("<" in b and ">" in b)) else b
+        self.integrates = bool(re.search(r"\bintegrat", field(RE_KIND, t), re.I))
+        # THE MODEL THIS TASK'S CONTRACT NAMES. Used to pin the worker's
+        # subagents (subagent_model); the worker itself is launched by the
+        # runtime row, which is a separate question.
+        mm = RE_MODEL.search(t)
+        m = mm.group(1).strip() if mm else ""
+        self.model = "" if ("<" in m or ">" in m) else m
 
     def route(self):
         """§2b, first match wins. Returns (decision, clause)."""
@@ -962,6 +978,15 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     # the dispatch record below publishes exactly which keys were applied so
     # that a row doing something surprising is visible rather than mysterious.
     renv, renv_dropped = runtime_env(row)
+    sm, sm_src = subagent_model(plan, t)
+    pin_key = row.get("subagent_model_env")
+    if sm and pin_key and RE_ENVKEY.match(str(pin_key)) and RE_MODEL_OK.match(sm):
+        renv[pin_key] = sm
+    elif sm and pin_key:
+        sm, sm_src = None, f"refused {sm!r}: not a model identifier, so not pinned"
+    elif sm:
+        sm_src += " — but this runtime row names no subagent_model_env, so not pinned"
+        sm = None
     env.update(renv)
 
     rec = {"run": rid, "seq": seq, "task": t.id, "attempt": 1,
@@ -986,6 +1011,11 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            # for: whether the caps that were supposed to be in force actually
            # were, on this dispatch, for this task.
            "env": sorted(renv),
+           # WHICH MODEL THIS TASK'S SUBAGENTS WERE PINNED TO, AND FROM WHERE.
+           # The model name is not a secret, unlike an env value in general, and
+           # "what did the helpers run on" is the first question after a cost
+           # surprise.
+           "subagent_model": {"model": sm, "source": sm_src},
            "env_dropped": renv_dropped or None,
            # WHERE THE CALIBRATION FILE ENDED UP, or why nowhere. Filled in
            # after the dry return, so a dry run reports null and has still
@@ -1295,6 +1325,78 @@ def runtime_env(row: dict):
         else:
             dropped.append(str(k))
     return kept, dropped
+
+
+# ── the subagent model pin ──────────────────────────────────────────────────
+# Which model a worker's SUBAGENTS run on. Pinned per task, from the persona:
+# the persona file's `model:` if it has one, this task's **Model:** otherwise.
+#
+# WHY PER TASK AND NOT ONE GLOBAL VALUE. The first version of this — shipped
+# 2026-09-07 — set `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=claude-sonnet-5` in the
+# runtimes row and described it as pinning every subagent to Sonnet. It did
+# not. Read out of the installed bundle, FORCE is only ever tested for being
+# SET: it removes the Agent tool's `model` parameter. The model name comes from
+# `CLAUDE_CODE_SUBAGENT_MODEL`, which was never set, so subagents inherited
+# their parent's model. The test for it asserted the string reached the child
+# environment, which proves delivery and nothing about effect.
+#
+# So the row now carries FORCE as the switch it is, and names the variable that
+# carries the model (`subagent_model_env`) — still the only place a vendor's
+# variable is named — and the value is filled in here, per dispatch, from the
+# persona. A Haiku persona's helpers run on Haiku and an Opus persona's on Opus,
+# and neither can quietly ask for another: escalating a model is a change to the
+# task's contract, where it is visible, and the pin follows it.
+RE_MODEL_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]{0,63}$")
+
+
+def subagent_model(plan: "Plan", t: "Task"):
+    """(model, source) for this task's subagents, or (None, why-not)."""
+    if t.agent and RE_AGENT_OK.match(t.agent):
+        pdir = "_personas"
+        try:
+            pdir = json.loads((plan.root / "SMOKIN.json").read_text()).get("persona_dir", pdir)
+        except (OSError, ValueError):
+            pass
+        pf = plan.root / pdir / f"{t.agent}.md"
+        if pf.is_file():
+            fm = re.match(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)",
+                          pf.read_text(errors="replace"), re.S)
+            if fm:
+                mm = re.search(r"^model:\s*['\"]?([^'\"\n#]+?)['\"]?\s*(?:#.*)?$",
+                               fm.group(1), re.M)
+                if mm and mm.group(1).strip().lower() != "inherit":
+                    return mm.group(1).strip(), f"persona file {pf.relative_to(plan.root)}"
+    if t.model:
+        return t.model, "task **Model:**"
+    return None, "no persona file model and no **Model:** — subagents inherit"
+
+
+def unintegrated_branches(plan: "Plan"):
+    """[(task id, branch)] for every declared branch no integration task merges.
+
+    THE RUNNER'S HALF OF check_integration. The gate refuses a plan whose
+    branches have no integrator downstream; this refuses to call a plan
+    COMPLETE in the same state, for the plan that reaches it without passing
+    through the gate. Decided from TASK.md fields alone — no git call, no
+    probe of the world — because the merge itself is proved the only way this
+    tool proves anything: the integration task's own done-command, run as a
+    verdict, names each branch it merges.
+    """
+    tasks = plan.tasks
+    integ = [tid for tid, tk in tasks.items() if tk.integrates]
+
+    def upstream(tid, seen=None):
+        seen = set() if seen is None else seen
+        for d in tasks[tid].blocked_by:
+            if d in tasks and d not in seen:
+                seen.add(d)
+                upstream(d, seen)
+        return seen
+
+    ups = {g: upstream(g) for g in integ}
+    return sorted((tid, tk.branch) for tid, tk in tasks.items()
+                  if tk.branch and not tk.integrates
+                  and not any(tid in ups[g] for g in integ))
 
 
 WORKTREE_CLAIM = ".smokin-worktree-claim.json"
@@ -2203,6 +2305,13 @@ def tick(plan: Plan, dry=False, close_panes=False):
 
     inflight = st["counts"]["running"] + st["counts"]["claimed"] + st["counts"]["judging"]
     complete = st["counts"]["verified"] == len(plan.tasks) and plan.tasks
+    # EVERY TASK VERIFIED IS NOT THE SAME AS DONE while a declared branch has
+    # nobody downstream to merge it. Every contract says "Do NOT merge", so in
+    # that state all of the work is still on branches — and "complete" is what
+    # an operator reads as "it landed".
+    unmerged = unintegrated_branches(plan) if complete else []
+    if unmerged:
+        complete = False
     # STUCK MEANS NOBODY CAN ACT. A frontier of parked human tasks is not that —
     # somebody can act, and it is not this program. Reading the two as one state
     # is what would make an operator go looking for a broken plan when the plan
@@ -2234,6 +2343,15 @@ def tick(plan: Plan, dry=False, close_panes=False):
             print_halt(rec)
             return 4
 
+    if unmerged:
+        names = ", ".join(f"{tid} ({b})" for tid, b in unmerged)
+        print(f"\nevery task verified — NOT COMPLETE: {len(unmerged)} declared branch(es) "
+              f"have no integration task downstream: {names}")
+        print("Nothing in this plan merges them. Add a task with **Kind:** integration,")
+        print("blocked by each, whose done-command names each branch. If you merged by")
+        print("hand, record it the same way, owned by a person — the plan cannot see a")
+        print("merge nobody told it about, and saying 'complete' here would be a guess.")
+        return 5
     if complete:
         print(f"\nplan complete — {len(plan.tasks)}/{len(plan.tasks)} verified")
         return 0
@@ -2587,7 +2705,31 @@ def _uncapped(name: str, row: dict):
     fine: it falls through to the template and gets the block for free.
     """
     head = (row.get("headless") or "") + " " + (row.get("pane") or "")
-    return (not row.get("env")) and any(c in head or c == name for c in CAPPABLE)
+    # Two keys since 2026-09-11: the caps (`env`), and the name of the variable
+    # that carries a task's model to its subagents (`subagent_model_env`). A row
+    # with caps and no pin key still lets every worker's helpers inherit.
+    return ((not row.get("env") or not row.get("subagent_model_env"))
+            and any(c in head or c == name for c in CAPPABLE))
+
+
+def _debrief_hook_wired(plan: Plan) -> bool:
+    """Does any settings file Claude Code reads for this plan wire the debrief hook?
+
+    THE DEBRIEF IS A PREREQUISITE, so somebody has to say when it is missing —
+    by this project's own rule a requirement nothing reports is a preference,
+    and preferences are what gets skipped. A string search, deliberately: it
+    answers "did anyone wire it", which is the question, and parsing four files'
+    hook trees to answer the same thing would be a second loader for a format
+    this tool does not own.
+    """
+    for base in (Path.home() / ".claude", plan.root / ".claude"):
+        for name in ("settings.json", "settings.local.json"):
+            try:
+                if "debrief-on-subagent-stop" in (base / name).read_text(errors="replace"):
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def doctor(plan: Plan, fix: bool = False):
@@ -2624,6 +2766,7 @@ def doctor(plan: Plan, fix: bool = False):
                                  if str(plan.root).startswith("/mnt/") else "native fs")
     except OSError:
         pass
+    out["host"]["debrief_hook"] = _debrief_hook_wired(plan)
     plan.priv.mkdir(parents=True, exist_ok=True)
     (plan.priv / "doctor.json").write_text(json.dumps(out, indent=1) + "\n")
     print(f"host      sh={out['host']['sh']}  herdr={'yes' if out['host']['herdr'] else 'no'}"
@@ -2646,6 +2789,11 @@ def doctor(plan: Plan, fix: bool = False):
                   f"Smokin appends the dispatch line last, so that flag will "
                   f"consume it and the runtime will report the instruction as a "
                   f"missing file. Put a non-list argument last.")
+    if not out["host"]["debrief_hook"]:
+        print("          WARNING   the debrief hook is not wired — no settings.json this "
+              "session reads mentions debrief-on-subagent-stop.sh, so a subagent or worker "
+              "that finishes leaves no debrief. It is a prerequisite, not an extra; see "
+              "templates/hooks.json.template.")
     if fix:
         return doctor_fix(plan, out)
 
@@ -2709,6 +2857,9 @@ def doctor_fix(plan: Plan, report: dict):
             print(f"          skipped {n}: the shipped table declares no env for it either")
             continue
         raw.setdefault(n, {})["env"] = dict(block)
+        pin = (tpl.get(n) or {}).get("subagent_model_env")
+        if pin:
+            raw[n]["subagent_model_env"] = pin
         changed.append(n)
     if not changed:
         print("\nnothing to fix: no shipped caps exist for the uncapped runtimes.")
@@ -3127,7 +3278,10 @@ def main():
         if inflight:
             return 1
         if plan.tasks and c.get("verified", 0) == len(plan.tasks):
-            return 0
+            # SAME RULE AS tick, or the two disagree — which the comment above
+            # says they never may. Verified branches nobody merges are a plan at
+            # rest waiting on a person, not a complete one.
+            return 5 if unintegrated_branches(plan) else 0
         # NOTHING IS RUNNING FROM HERE DOWN, so every code below is safe to
         # update on. The distinction is what the operator does NEXT, and the
         # one that matters is that READY-BUT-NOT-STARTED is not "in flight":
