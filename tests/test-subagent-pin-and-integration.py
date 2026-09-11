@@ -63,6 +63,7 @@ def plan(name, tasks, row=None):
         d.mkdir(parents=True)
         agent = o.get("agent", f"w{tid}")
         model = f" · **Model:** `{o['model']}`" if o.get("model") else ""
+        model += f" · **Effort:** {o['effort']}" if o.get("effort") else ""
         extra = "".join(f"**{k}:** {v}\n" for k, v in (("Branch", o.get("branch")),
                                                      ("Kind", o.get("kind"))) if v)
         d.joinpath("TASK.md").write_text(
@@ -181,6 +182,37 @@ try:
     smokin("tick", str(P))
     chk("a value that is not a model identifier never reaches the argv",
         any("touch-x" in x for x in args(P)[:-1]), False)
+
+    print("\n=== 1d · the worker runs at the task's declared effort ===")
+    EROW = dict(WROW, effort_flag="--effort {EFFORT}")
+    val = lambda a, f: a[a.index(f) + 1] if f in a else None
+    P = plan("e-high", {"T1": {"model": "claude-sonnet-5", "effort": "high", "agent": "impl"}}, EROW)
+    smokin("tick", str(P)); a = args(P)
+    chk("the worker is launched with --effort <the task's Effort>", val(a, "--effort"), "high")
+    chk("...before the dispatch line, which stays last",
+        "--effort" in a and a.index("--effort") < len(a) - 2, True)
+    chk("...and the record says what was applied",
+        rec_of(P)["worker_effort"], {"effort": "high", "source": "task **Effort:**"})
+    P = plan("e-max", {"T1": {"model": "claude-opus-5", "effort": "max", "agent": "impl"}}, EROW)
+    smokin("tick", str(P))
+    chk("max reaches the worker — the CLI lists all five levels", val(args(P), "--effort"), "max")
+    P = plan("e-haiku", {"T1": {"model": "claude-haiku-4-5", "effort": "high", "agent": "impl"}}, EROW)
+    smokin("tick", str(P)); a = args(P); we = rec_of(P)["worker_effort"]
+    chk("on Haiku, no --effort — the API rejects it and the CLI would drop it", "--effort" in a, False)
+    chk("...and the record says why instead of claiming an effort",
+        (we["effort"], "rejects the effort" in we["source"]), (None, True))
+    chk("...while its --model still goes through", val(a, "--model"), "claude-haiku-4-5")
+    P = plan("e-none", {"T1": {"model": "claude-sonnet-5", "agent": "impl"}}, EROW)
+    smokin("tick", str(P))
+    chk("CONTROL · no Effort declared: no flag", "--effort" in args(P), False)
+    P = plan("e-bad", {"T1": {"model": "claude-sonnet-5", "effort": "turbo", "agent": "impl"}}, EROW)
+    smokin("tick", str(P))
+    chk("an effort the CLI does not accept is refused, not passed",
+        ("--effort" in args(P), "refused" in rec_of(P)["worker_effort"]["source"]), (False, True))
+    P = plan("e-norow", {"T1": {"model": "claude-sonnet-5", "effort": "high", "agent": "impl"}}, WROW)
+    smokin("tick", str(P))
+    chk("a row with no effort_flag passes none, and the record says so",
+        ("--effort" in args(P), "no effort_flag" in rec_of(P)["worker_effort"]["source"]), (False, True))
 
     print("\n=== 2 · every task verified is not complete while a branch is unmerged ===")
     P = plan("unmerged", {"T1": {"branch": "`feat/a`"}})

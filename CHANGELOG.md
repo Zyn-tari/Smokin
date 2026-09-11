@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — the worker runs at its declared effort · 2026-09-11
+
+Grillin requires every agent task to declare an **Effort:** of `high` or above — the misses that
+cost most in its history were on work priced as routine — and nothing passed it to the worker. The
+floor was a declaration nothing applied: the same shape as the model, one field over.
+
+- **`effort_flag`** (`--effort {EFFORT}` for claude) is appended to `headless` before the dispatch
+  line, and `{EFFORT_FLAG}` in `pane` expands to it. `claude --help` on 2.1.263 lists
+  `--effort <level> (low, medium, high, xhigh, max)` — all five, so a declared `max` reaches the
+  worker. Anything else is refused, not passed.
+- **Not on Haiku.** The API rejects the parameter for Haiku 4.5 and the CLI drops it for models
+  without effort support, so passing one would be harmless at runtime and false on paper: the
+  record would claim an effort that was never applied. The dispatch record's new `worker_effort`
+  says it was withheld and why. Grillin already refuses an Effort on a Haiku task; this is the
+  half for a plan that reaches the runner without passing the gate.
+- **From the task's Effort only, not the persona file.** The model reads the persona file first
+  because it was asked for and Grillin checks the two agree. A second place to declare effort
+  would need its own agreement check, and a declaration nothing checks is what this closes.
+- `doctor` counts a claude row without `effort_flag` as incomplete; `--fix` copies it.
+
+Pin, merge & debrief harness 43 → 53 checks.
+
+
 ## Unreleased — the worker runs on its persona's model · 2026-09-11
 
 Decided by the user the same day as the pin: the persona's model governs the worker, not only

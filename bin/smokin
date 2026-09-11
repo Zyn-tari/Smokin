@@ -125,6 +125,7 @@ RE_TYPE = RE_FIELD("Type")
 # fields; this is the runtime half — see unintegrated_branches().
 RE_BRANCH = RE_FIELD("Branch")
 RE_KIND = RE_FIELD("Kind")
+RE_EFFORT_T = RE_FIELD("Effort")
 # WHO the plan says is doing the work, as distinct from who is accountable for
 # it. Grillin's validator says it in a comment beside its own regex: "`**Owner:**`
 # is who is accountable. `**Agent:**` is the PERSONA." Smokin read `Owner` and
@@ -364,6 +365,12 @@ class Task:
         mm = RE_MODEL.search(t)
         m = mm.group(1).strip() if mm else ""
         self.model = "" if ("<" in m or ">" in m) else m
+        # THE EFFORT THIS TASK'S CONTRACT NAMES — first word, lower-cased, so
+        # "high" and "high — see the roster" read the same. Grillin requires it
+        # on every agent task and refuses it on Haiku; until 2026-09-11 nothing
+        # passed it anywhere.
+        e = field(RE_EFFORT_T, t).strip().strip("`").split()
+        self.effort = e[0].lower() if e and not e[0].startswith("<") else ""
 
     def route(self):
         """§2b, first match wins. Returns (decision, clause)."""
@@ -983,6 +990,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     # so the two can never disagree about which model a persona is.
     pm, pm_src = subagent_model(plan, t)
     wargv = model_argv(row, pm)
+    eargv, worker_effort = effort_argv(row, t.effort, pm)
     if wargv:
         worker_model = {"model": pm, "source": pm_src}
     elif pm and not RE_MODEL_OK.match(pm):
@@ -1033,6 +1041,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            # WHAT THE WORKER ITSELF WAS LAUNCHED ON. Until 2026-09-11 the answer
            # was always "the runtime's default" and nothing said so.
            "worker_model": worker_model,
+           "worker_effort": worker_effort,
            "env_dropped": renv_dropped or None,
            # WHERE THE CALIBRATION FILE ENDED UP, or why nowhere. Filled in
            # after the dry return, so a dry run reports null and has still
@@ -1110,6 +1119,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
              # {WT} stays because runtimes.json files in the field use it.
                       .replace("{WT}", str(plan.root))
                      .replace("{MODEL_FLAG}", " ".join(shlex.quote(a) for a in wargv))
+                     .replace("{EFFORT_FLAG}", " ".join(shlex.quote(a) for a in eargv))
                      .replace("{LINE}", shlex.quote(line)))
         # QUOTED, unlike the two SMOKIN_* assignments beside them, which this
         # file has always written bare. These values come from a runtimes row
@@ -1177,7 +1187,7 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
     (plan.priv / "dispatch" / f"{t.id}.json").write_text(json.dumps(rec, indent=1) + "\n")
     # The persona flag goes BEFORE the dispatch line, which is always last.
     argv = (["bash", wrapper, t.id, "--"] + head.split()
-            + persona_argv(row, plan, t) + wargv + [line])
+            + persona_argv(row, plan, t) + wargv + eargv + [line])
     p = subprocess.Popen(argv, cwd=str(plan.root), env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -1255,6 +1265,43 @@ def model_argv(row: dict, model):
     if not tmpl or not model or not RE_MODEL_OK.match(model):
         return []
     return shlex.split(tmpl.replace("{MODEL}", shlex.quote(model)))
+
+
+def effort_argv(row: dict, effort: str, model):
+    """(argv, record) for the worker's effort: the `effort_flag` row, or nothing and why.
+
+    THE FLOOR WAS A DECLARATION NOTHING APPLIED. Grillin has required every agent
+    task to declare an **Effort:** at or above `high` — "the misses that cost
+    most in this method's history were on work that had been priced as
+    routine" — and the runner never passed it on, so every worker ran at the
+    runtime's default whatever its contract said. The same shape as the model,
+    one field over, and closed the same way.
+
+    FROM THE TASK ONLY, NOT THE PERSONA FILE. The model reads the persona file
+    first because the user asked for that and Grillin checks the two agree. A
+    second place to declare effort would need its own agreement check, and a
+    declaration nothing checks is exactly what this change is closing.
+
+    NOT ON HAIKU, and the record says so rather than pretending: the API
+    rejects the parameter for Haiku 4.5 and the CLI silently drops it, so
+    passing it would be harmless at runtime and false on paper.
+    """
+    tmpl = (row or {}).get("effort_flag")
+    if not effort:
+        return [], {"effort": None, "source": "the task declares no **Effort:**"}
+    if effort not in EFFORTS:
+        return [], {"effort": None,
+                    "source": f"refused {effort!r}: not one of {', '.join(EFFORTS)}"}
+    if model_family(model) in EFFORT_UNSUPPORTED:
+        return [], {"effort": None,
+                    "source": f"not passed: {model} rejects the effort parameter, and the CLI "
+                              f"would drop it — recording it as applied would be false"}
+    if not tmpl:
+        return [], {"effort": None,
+                    "source": "this runtime row names no effort_flag — the worker runs at "
+                              "the runtime's own default effort"}
+    return (shlex.split(tmpl.replace("{EFFORT}", shlex.quote(effort))),
+            {"effort": effort, "source": "task **Effort:**"})
 
 
 # A LOCK THAT LIVES IN THE DIRECTORY IT PROTECTS.
@@ -1389,6 +1436,23 @@ def runtime_env(row: dict):
 # and neither can quietly ask for another: escalating a model is a change to the
 # task's contract, where it is visible, and the pin follows it.
 RE_MODEL_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]{0,63}$")
+
+
+# The levels `claude --help` lists for --effort (2.1.263): all five, max included.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Families whose API rejects the effort parameter. The CLI drops it for them
+# without a word, so passing one would make the dispatch record claim an effort
+# that was never applied — the false record this tool exists to refuse.
+EFFORT_UNSUPPORTED = ("haiku",)
+
+
+def model_family(model):
+    """opus / sonnet / haiku / fable / mythos, from an alias or an id; else None."""
+    m = (model or "").lower()
+    for fam in ("fable", "mythos", "opus", "sonnet", "haiku"):
+        if fam in m:
+            return fam
+    return None
 
 
 def subagent_model(plan: "Plan", t: "Task"):
@@ -2751,7 +2815,7 @@ def _uncapped(name: str, row: dict):
     # that carries a task's model to its subagents (`subagent_model_env`). A row
     # with caps and no pin key still lets every worker's helpers inherit.
     return ((not row.get("env") or not row.get("subagent_model_env")
-             or not row.get("model_flag"))
+             or not row.get("model_flag") or not row.get("effort_flag"))
             and any(c in head or c == name for c in CAPPABLE))
 
 
@@ -2907,7 +2971,7 @@ def doctor_fix(plan: Plan, report: dict):
         trow = tpl.get(n) or {}
         if not row_.get("env"):
             row_["env"] = dict(block)
-        for k in ("subagent_model_env", "model_flag"):
+        for k in ("subagent_model_env", "model_flag", "effort_flag"):
             if trow.get(k) and not row_.get(k):
                 row_[k] = trow[k]
         changed.append(n)
