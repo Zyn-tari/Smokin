@@ -340,6 +340,18 @@ else
   cat "$LAB/pin.out"
 fi
 
+# THE INSTRUCTION REACHING A PANE. Every fixture above declares `{LINE}` in its
+# own pane row, so none of them could see that no SHIPPED row did: the line was
+# built and discarded, and the task was reaped at its full budget. One fixture,
+# one variable, plus the shipped table read at run time.
+if python3 "$ROOT/tests/test-pane-dispatch-line.py" > "$LAB/paneline.out" 2>&1; then
+  n=$(count_pass "$LAB/paneline.out")
+  ok "pane dispatch line: $n checks on the instruction reaching a pane"
+else
+  bad "pane dispatch line" "see below"
+  cat "$LAB/paneline.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

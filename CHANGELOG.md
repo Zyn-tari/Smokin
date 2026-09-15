@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased — the instruction reaches the pane · 2026-09-15
+
+A pane-dispatched task started its agent with **no instruction at all**. Every task gets a
+dispatch line — `read tasks/<ID>/TASK.md and follow it` — and the pane path only delivers it when
+the runtime's `pane` template contains `{LINE}`, which `launch()` substitutes. Not one shipped row
+did. The line was built and thrown away, the agent sat at an empty prompt, and the task was reaped
+at its full budget with claim `partial` and nothing to show.
+
+**Measured before it was changed**, one fixture and one variable, the plan directory and run id
+held constant:
+
+```
+pane: "bash demo-agent.sh"           -> bash smokin-run T1 -- bash demo-agent.sh
+pane: "bash demo-agent.sh {LINE}"    -> bash smokin-run T1 -- bash demo-agent.sh 'read tasks/T1/TASK.md and follow it'
+```
+
+and the consequence, not just the string: the first task ended `terminal: "reaped"`,
+`claim: "partial"`, `artifacts: {}`, after 60.4s of a 60s budget.
+
+**Not a regression.** The row has read `"pane": "claude"` since `f65386c` (2026-08-05), the
+commit that first shipped the runtimes table; the `{MODEL_FLAG}` and `{EFFORT_FLAG}` added on
+2026-09-11 went into a string that already had no
+`{LINE}`. This is a capability nobody had exercised, which is why nothing caught it — every
+fixture in `tests/` declares `{LINE}` in its own `pane` row, so the one existing assertion about a
+pane command (`test-memory.py`, "the pane command quotes the dispatch line") proves QUOTING and
+never DELIVERY.
+
+**It was already on the record, misread.** `EXPERIMENTS.md` Q1 dispatched a codewhale pane with no
+line and reported the TUI alive at `❯ Write a task or use /.` — with "receipt while TUI alive:
+False" annotated *correct, it has not finished*. Q1's conclusion is right and stands: the wrapper
+emits. What nobody asked was why the agent never did any work. The experiment is left exactly as
+written; this is the reading it did not get.
+
+**The fix is per-vendor, because the vendors disagree.** Read from each `--help` on this machine:
+
+| row | positional | `{LINE}` |
+|---|---|---|
+| `claude` | `claude [options] [command] [prompt]`, interactive by default | **added** |
+| `codewhale` | `codewhale [OPTIONS] [PROMPT]` | **added** |
+| `opencode` | the pane row is the TUI, whose positional is `[project]` — a PATH | declined |
+| `aider` | positionals are FILES to add to the chat | declined |
+| `codex` | not installed; nothing here has measured it | declined |
+
+Adding `{LINE}` uniformly would have produced two launch strings that run and are wrong, which is
+worse than one that fails loudly. The three declining rows say why in their own `note`, because an
+absence with no reason beside it is indistinguishable from the defect.
+
+- **`smokin doctor` reports `pane_drops_dispatch_line`** for any pane row without the placeholder,
+  and prints it. It is the sibling of `swallows_dispatch_line`, which has protected the same
+  invariant on the headless path since it shipped: the instruction must reach the worker.
+- **`--fix` will not repair it**, and the refusal is in `doctor_fix`'s own list. Whether a runtime
+  takes a positional prompt is a fact about the vendor, not about this file.
+- **Decided by the user, 2026-09-15:** seed every pane identically. Clauses 1-3 route to a pane
+  because a person is there to watch or interrupt — not because the agent should wait to be told
+  what to do.
+
+New harness `tests/test-pane-dispatch-line.py` — 19 checks: the mutation, the silent control that
+differs from it by the instruction and nothing else, doctor in both directions, the shipped table
+read at run time rather than restated, and the terminal state an agent that was told nothing
+actually reaches.
+
 ## Unreleased — the worker runs at its declared effort · 2026-09-11
 
 Grillin requires every agent task to declare an **Effort:** of `high` or above — the misses that

@@ -9,6 +9,19 @@
     "",
     "{LINE} is the one-line dispatch prompt. {WT} is the plan root.",
     "",
+    "A `pane` ROW WITHOUT {LINE} NEVER RECEIVES ITS INSTRUCTION. `launch()` substitutes {LINE}",
+    "into the template, so a row without the placeholder is handed to `herdr pane run` with the",
+    "dispatch line built and then discarded: the agent starts at an empty prompt, does nothing,",
+    "and is reaped at its FULL budget with claim `partial` and no artefacts. MEASURED 2026-09-15,",
+    "one fixture and one variable -- `bash demo-agent.sh` vs `bash demo-agent.sh {LINE}`. The first",
+    "command carried no instruction and its task ended terminal `reaped` after 60.4s of a 60s",
+    "budget; the second carried it. Every row here shipped without {LINE} from f65386c (2026-08-05),",
+    "so this is not a regression -- it is a capability nobody had exercised. It is added only",
+    "where a positional prompt is CONFIRMED from the vendor's own --help (claude, codewhale).",
+    "Where the positional means something else the row says so in its note, and `smokin doctor`",
+    "names every pane row that drops the line. `--fix` will not touch it: guessing a vendor's",
+    "positional produces a launch string that runs and is wrong.",
+    "",
     "`env` is the ONLY place a vendor's environment variables are named, same rule as the",
     "launch strings: a runtime is a row, not a code path. It exists because some rules cannot",
     "survive as prose -- `Do NOT spawn sub-agents` sat in Grillin's task template as a line",
@@ -65,7 +78,7 @@
   "claude": {
     "headless": "claude -p --permission-mode acceptEdits --output-format json",
     "judge": "claude -p --permission-mode acceptEdits --model {MODEL}",
-    "pane": "claude {MODEL_FLAG} {EFFORT_FLAG}",
+    "pane": "claude {MODEL_FLAG} {EFFORT_FLAG} {LINE}",
     "model_flag": "--model {MODEL}",
     "effort_flag": "--effort {EFFORT}",
     "holds_credentials": false,
@@ -94,7 +107,7 @@
 
   "codewhale": {
     "headless": "codewhale exec --auto --output-format stream-json",
-    "pane": "codewhale -C {WT} --skip-onboarding",
+    "pane": "codewhale -C {WT} --skip-onboarding {LINE}",
     "holds_credentials": true,
     "global_config": "~/.codewhale/config.toml",
     "hook_scope": "global-only",
@@ -128,7 +141,7 @@
       "cost_usd": "part.cost"
     },
     "verified": "`opencode run --format json \"reply with the single word OK\"` CONFIRMED: exit 0, NDJSON on stdout with step_start / text / step_finish, part.tokens={total:8499,input:8497,output:2,reasoning:0,cache:{write:0,read:0}} and part.cost=0.003697935. A second run (\"count from one to twenty\") CONFIRMED that a `text` part arrives WHOLE \u2014 one event, 131 chars \u2014 not in chunks, which is why result_from takes the last and does not join. First invocation took over two minutes to print anything; that is server start-up, not a hang, and it matters because a budget under ~180s will reap this runtime before it speaks.",
-    "note": "usage select is `sum`, not `last`: step_finish is emitted PER STEP, so a run with tool use reports several and the run total is their sum. claude and codewhale are `last` because their envelope already totals the run, and summing a repeated total would double it. Its SSE event stream needs a resident subscriber, which is the one thing this design refuses to depend on. Wrapper + reaper only."
+    "note": "usage select is `sum`, not `last`: step_finish is emitted PER STEP, so a run with tool use reports several and the run total is their sum. claude and codewhale are `last` because their envelope already totals the run, and summing a repeated total would double it. Its SSE event stream needs a resident subscriber, which is the one thing this design refuses to depend on. Wrapper + reaper only. NO {LINE} IN THE PANE ROW, deliberately: the pane row is the TUI, whose positional is a PROJECT PATH (`opencode [project]`), while the message form is the separate `opencode run [message..]` subcommand -- appending the dispatch line here would be read as a directory. A pane task on this runtime therefore starts with no instruction, and `smokin doctor` says so rather than the row pretending otherwise."
   },
 
   "codex": {
@@ -137,7 +150,7 @@
     "holds_credentials": true,
     "hook_scope": "global-notify",
     "verified": "NOT INSTALLED on this machine — every field here is SUSPECTED, from vendor docs",
-    "note": "codex is absent, so smokin doctor reports it MISSING rather than letting a gate that shells out to it exit 127 and read as a clean failure."
+    "note": "codex is absent, so smokin doctor reports it MISSING rather than letting a gate that shells out to it exit 127 and read as a clean failure. Its pane row carries no {LINE} either and nothing here has measured whether `codex` takes a positional prompt, so the row is left alone and doctor names it -- the honest state for a runtime nobody on this machine can run."
   },
 
   "aider": {
@@ -146,6 +159,6 @@
     "holds_credentials": false,
     "hook_scope": "none",
     "verified": "installed at ~/.local/bin/aider; untested",
-    "note": "Untested end to end. Declared so doctor reports it honestly rather than omitting it."
+    "note": "Untested end to end. Declared so doctor reports it honestly rather than omitting it. NO {LINE} IN THE PANE ROW: aider's positional arguments are FILES to add to the chat, so the dispatch line would be read as a filename. Its message form is `--message`, which the headless row already uses. doctor reports this row as dropping the dispatch line."
   }
 }

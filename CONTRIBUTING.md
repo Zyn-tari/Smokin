@@ -65,10 +65,11 @@ filesystem, never the screen.
 ## If you touch the tick
 
 ```bash
-bash tests/run-tests.sh          # 38 checks; crash recovery, the emitter mutex, verify,
+bash tests/run-tests.sh          # 42 checks; crash recovery, the emitter mutex, verify,
                                  # the delegation node, plan invariants, the hook,
                                  # token capture, pane reuse, agent memory,
-                                 # continuity, agent serialisation
+                                 # continuity, agent serialisation, the dispatch
+                                 # line reaching a pane
 ```
 
 Every loud check needs a **silent control** beside it. A test proving your mechanism fires

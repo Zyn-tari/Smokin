@@ -2854,6 +2854,19 @@ def doctor(plan: Plan, fix: bool = False):
             # .../read tasks/H1/TASK.md and follow it". Cheap to check, and the
             # only place anyone would look after seeing that message.
             "swallows_dispatch_line": bool(head) and head[-1] in VARIADIC_FLAGS,
+            # THE SAME INVARIANT, ON THE OTHER PATH. The line above protects the
+            # HEADLESS path from a launch string that eats the instruction.
+            # Nothing protected the PANE path from one that never asks for it:
+            # `launch()` substitutes {LINE} into the pane template, so a row
+            # without the placeholder is handed to `herdr pane run` with the
+            # dispatch line built and discarded. The agent starts at an empty
+            # prompt, does nothing, and is reaped at its full budget. MEASURED
+            # 2026-09-15 on both arms of one fixture: `bash demo-agent.sh` gave
+            # a command with no instruction and a task that ended `reaped` after
+            # 60.4s of a 60s budget; `bash demo-agent.sh {LINE}` gave the line.
+            # Reported and never repaired — see doctor_fix's refusals.
+            "pane_drops_dispatch_line": (bool(row.get("pane"))
+                                         and "{LINE}" not in row["pane"]),
             "uncapped": _uncapped(name, row),
             "env": sorted((row.get("env") or {}).keys()),
             "persona_flag": bool(row.get("persona_flag"))}
@@ -2896,6 +2909,12 @@ def doctor(plan: Plan, fix: bool = False):
                   f"Smokin appends the dispatch line last, so that flag will "
                   f"consume it and the runtime will report the instruction as a "
                   f"missing file. Put a non-list argument last.")
+        if r.get("pane_drops_dispatch_line"):
+            print(f"          WARNING   {n}'s pane launch string has no {{LINE}}, so a pane "
+                  f"task on this runtime starts with NO INSTRUCTION and is reaped at "
+                  f"its full budget with nothing to show. Add {{LINE}} if this runtime "
+                  f"takes a positional prompt. `--fix` will not: two of the shipped "
+                  f"rows would read the dispatch line as a project path or a filename.")
     if not out["host"]["debrief_hook"]:
         print("          WARNING   the debrief hook is not wired — no settings.json this "
               "session reads mentions debrief-on-subagent-stop.sh, so a subagent or worker "
@@ -2929,6 +2948,12 @@ def doctor_fix(plan: Plan, report: dict):
                                              produces a launch string that runs
                                              and is wrong, which is worse than
                                              one that fails loudly
+      a pane row with no {LINE}              whether a runtime takes a positional
+                                             prompt is a fact about the vendor,
+                                             not about this file. Two of the five
+                                             shipped rows would read the dispatch
+                                             line as a project path or a filename,
+                                             and that runs and is wrong
       a plan under /mnt, herdr absent        facts about the host, not defects
 
     So one repair, and it exists because a change in this repository created the
