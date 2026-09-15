@@ -61,6 +61,14 @@ differs from it by the instruction and nothing else, doctor in both directions, 
 read at run time rather than restated, and the terminal state an agent that was told nothing
 actually reaches.
 
+It runs with `--max-wait 1`, and that flag is worth 113 seconds. After each tick `run` waits for a
+file to move, capped at `MAX_WAIT_S` (30s). The harness's stub herdr RECORDS the dispatch and
+never executes it — deliberately, since a real pane with no instruction sits there rather than
+exiting — so in that fixture nothing ever moves and every iteration burns the whole ceiling; four
+pane tasks serialised by `PANE_CEILING`=1 cost 4 x 30s. Measured 120.8s at the default against
+8.5s capped, with T1's receipt identical either way. Inproc fillers were measured too and are
+worth nothing once the wait is capped (8.2s vs 8.3s), so the fixture keeps its four pane tasks.
+
 ## Unreleased — the worker runs at its declared effort · 2026-09-11
 
 Grillin requires every agent task to declare an **Effort:** of `high` or above — the misses that

@@ -192,7 +192,17 @@ sys.exit(0)
 # ceiling-blocked task is queued rather than dispatched.
 p = mkplan("reaped", "bash demo-agent.sh", tids=("T1", "T2", "T3", "T4"), budget=3)
 st = p / ".stub"; st.mkdir(parents=True, exist_ok=True)
-subprocess.run([str(SMOKIN), "run", str(p), "--interval", "1", "--max-ticks", "8"],
+# `--max-wait 1` IS NOT A DETAIL, IT IS 113 SECONDS. After each tick the run
+# loop waits for a file to move, capped at MAX_WAIT_S (30s). The stub above
+# RECORDS the dispatch and never executes it — which is the point, a real pane
+# with no instruction sits there rather than exiting — so in this fixture
+# nothing ever moves and every iteration burns the full ceiling. Four pane
+# tasks serialised by PANE_CEILING=1 cost 4 x 30s. MEASURED: 120.8s at the
+# default, 8.3s at `--max-wait 1`, with T1 still reaped/partial/no artefacts in
+# both. The wait is documented in `run` as "an optimisation over the old blind
+# sleep, never a gate on the loop"; capping it is what the flag is for.
+subprocess.run([str(SMOKIN), "run", str(p), "--interval", "1", "--max-ticks", "8",
+                "--max-wait", "1"],
                capture_output=True, text=True,
                env=dict(os.environ, PATH=f"{STUB}:{os.environ['PATH']}",
                         HERDR_ENV="1", HERDR_STUB_DIR=str(st),
