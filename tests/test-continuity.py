@@ -664,6 +664,73 @@ for _ in range(40):
         break
     time.sleep(0.1)
 
+print("\n=== fresh work is not made stale by a clock step ===")
+# The emitter used to decide "produced" by comparing FINDINGS.md's mtime with
+# the dispatch record's started_ns — both wall clock — so a step back just after
+# dispatch read fresh work as stale. It now compares content with what the file
+# held at dispatch (`findings_before`). Each case below sets started_ns AHEAD of
+# the file's mtime, which is what such a step leaves behind.
+import hashlib as _hl
+
+
+def emit_with(name, findings=None, before="absent", preexisting=None):
+    p = mkplan(name, [dict(tid="T1", owner="worker-T1")])
+    tdir = p / "tasks" / "T1"
+    if preexisting is not None:
+        (tdir / "FINDINGS.md").write_text(preexisting)
+    rec = {"task": "T1", "seq": "rTEST:T1:1", "run": "rTEST", "attempt": 1,
+           "runtime": "demo", "dispatch": "inproc", "placement": "inproc",
+           "started": "2026-01-01T00:00:00Z",
+           "started_ns": time.time_ns() + 10_000_000_000,   # 10s ahead of any write below
+           "started_epoch": time.time(), "budget_s": 60, **CL.stamp()}
+    if before != "absent":
+        rec["findings_before"] = before
+    (p / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps(rec))
+    if findings is not None:
+        (tdir / "FINDINGS.md").write_text(findings)
+    subprocess.run([str(ROOT / "bin" / "smokin-emit"), "T1", "stale-test"],
+                   input='{"terminal":"ok","exit":0}', text=True, capture_output=True,
+                   env=dict(os.environ, SMOKIN_PLAN=str(p)))
+    return json.loads((tdir / "RECEIPT.json").read_text())
+
+
+def h(text):
+    return "sha256:" + _hl.sha256(text.encode()).hexdigest()
+
+
+r = emit_with("stale-new", findings="# T1\n\nfound it\n", before=None)
+chk("new work written after a backward step reads as done", r.get("claim"), "done")
+chk("...decided by content", r.get("produced_by"), "content")
+r = emit_with("stale-ctl", findings="# T1\n\nfound it\n")
+chk("control · a record without findings_before reads it as partial (the old rule)",
+    r.get("claim"), "partial")
+has("...and says the old rule decided", str(r.get("produced_by")), "mtime")
+old = "# T1\n\nlast attempt\n"
+r = emit_with("stale-retry-same", preexisting=old, before=h(old))
+chk("a retry that left FINDINGS.md unchanged produced nothing", r.get("claim"), "partial")
+r = emit_with("stale-retry-new", preexisting=old, before=h(old), findings="# T1\n\nthis attempt\n")
+chk("a retry that changed FINDINGS.md produced something", r.get("claim"), "done")
+r = emit_with("stale-empty", findings="", before=None)
+chk("an empty FINDINGS.md is still nothing", r.get("claim"), "partial")
+r = emit_with("stale-malformed", findings="# T1\n\nfound it\n", before=42)
+chk("a malformed findings_before does not block real work", r.get("claim"), "done")
+
+p = mkplan("stamped-findings", [dict(tid="T1", owner="worker-T1")])
+(p / "tasks" / "T1" / "FINDINGS.md").write_text(old)
+subprocess.run([str(SMOKIN), "tick", str(p)], capture_output=True, text=True)
+d = json.loads((p / ".smokin" / "dispatch" / "T1.json").read_text())
+chk("a real dispatch records what FINDINGS.md held", d.get("findings_before"), h(old))
+p = mkplan("stamped-nofindings", [dict(tid="T1", owner="worker-T1")])
+subprocess.run([str(SMOKIN), "tick", str(p)], capture_output=True, text=True)
+d = json.loads((p / ".smokin" / "dispatch" / "T1.json").read_text())
+chk("...and null when there was none", ("findings_before" in d, d.get("findings_before")),
+    (True, None))
+for q in (LAB / "stamped-findings", LAB / "stamped-nofindings"):
+    for _ in range(40):
+        if (q / "tasks" / "T1" / "RECEIPT.json").is_file():
+            break
+        time.sleep(0.1)
+
 print()
 if fails:
     print(f"\033[31m{fails} failed\033[0m")

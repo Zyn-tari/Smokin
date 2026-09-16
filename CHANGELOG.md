@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — "produced" is decided by content, not by clock · 2026-09-16
+
+The emitter's completion gate decided a task had produced its FINDINGS.md by comparing the file's
+mtime with the dispatch record's `started_ns`. Both are wall-clock readings. On a machine whose
+clock is stepped back — measured the same day, about 2.2s every few minutes — work written just
+after dispatch had an mtime older than `started_ns` and was recorded as `claim: partial`,
+`terminal: no-artefact`. Found by the adversarial review of the monotonic-clock change; it predates
+that change.
+
+- **The dispatch record holds `findings_before`**: FINDINGS.md's `sha256:` at dispatch, in the
+  receipt's own form, or null when it was absent or empty. It is taken before the worker starts;
+  nothing deletes or rewrites the file.
+- **The gate:** FINDINGS.md exists, is non-empty, and differs from `findings_before`. A record
+  without the key keeps the old mtime rule. Receipts name the rule in `produced_by`.
+- **The deliberate cost:** a retry that writes byte-identical findings produced nothing new, and
+  reads as `partial`.
+
+`test-continuity.py` gains "fresh work is not made stale by a clock step" — new work after a
+backward step, the old-rule control, unchanged and changed retries, an empty file, a malformed
+`findings_before`, and real dispatches with and without an existing file. Continuity 133 → 143
+checks; the old rule fails four of them, and a dispatch that stops recording the hash fails two.
+DESIGN.md §3c and §3e describe the new gate.
+
 ## Unreleased — the clock change, finished after review · 2026-09-16
 
 An adversarial review of the monotonic-clock change (T14 in the suite-timing plan) upheld 16 of 18

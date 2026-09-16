@@ -603,6 +603,8 @@ own `RECEIPT.json` staging file.
 {"run":"r7f3c1","task":"T14","attempt":1,"dispatch":"pane","runtime":"codewhale",
  "cmd_file":".smokin/dispatch/T14.cmd","pid_or_pane":"w7:p9","started":"2026-08-05T14:02:11Z",
  "started_ns":1785931331000000000,"budget_s":3600,
+ "started_mono":20971.787,"mono_clock":"boottime","boot_id":"…",
+ "findings_before":"sha256:…|null",
  "placement":{"workspace":"w7","tab":"w7:t2","pane":"w7:p9"}}
 ```
 
@@ -612,7 +614,9 @@ orchestrator staring at a task with no receipt cannot distinguish *never dispatc
 a live reaper process; a judge called that out, and it is now a file written before the child
 starts.
 
-It also carries `started_ns`, which is the completion gate's reference point — see 3e.
+It also carries `findings_before` — what `FINDINGS.md` held at dispatch, or null — which is the
+completion gate's reference point (3e), and a monotonic start with its boot id, which the reaper
+measures the budget from (`bin/smokin_clock.py`).
 
 ### 3d · The emitter
 
@@ -635,8 +639,9 @@ Codex's `notify`, Codewhale's `turn_end`, OpenCode's `session.idle` — all of t
 from vendor docs and dossier probes; Claude's double-Stop on one task was observed in a probe and
 is the strongest single piece of evidence). So the emitter must test a task-level discriminator.
 
-**The gate:** `tasks/<ID>/FINDINGS.md` exists, is non-empty, and its mtime is **greater than
-`dispatch/<ID>.json`'s `started_ns`**.
+**The gate:** `tasks/<ID>/FINDINGS.md` exists, is non-empty, and its content **differs from
+`dispatch/<ID>.json`'s `findings_before`**. The receipt's `produced_by` says which rule decided; a
+record written before `findings_before` existed keeps the older mtime rule below.
 
 > **ADVERSARIAL FINDING (fatal, concurrency lens) — the draft's gate compared FINDINGS.md against
 > `mtime(TASK.md)`, and the output contract simultaneously requires the agent to update the
@@ -645,9 +650,17 @@ is the strongest single piece of evidence). So the emitter must test a task-leve
 > newer, the gate fails, the emitter writes nothing and exits 0. No receipt, no error, silence
 > until the reaper's timeout.**
 
-Landed, and fixed above: the reference point is a **dispatch-time timestamp on an immutable
-record**, not a mutable file the agent is contractually obliged to touch. The ordering of the
-agent's own writes stops mattering.
+Landed, and fixed: the reference point became a **dispatch-time timestamp on an immutable
+record** (`started_ns`), not a mutable file the agent is contractually obliged to touch. The
+ordering of the agent's own writes stopped mattering.
+
+> **FINDING, 2026-09-16 — that timestamp was a wall-clock reading, and so is a file's mtime.** On a
+> machine whose clock is stepped back (measured: ~2.2s every few minutes), work written just after
+> dispatch had an mtime *older* than `started_ns` and read as stale: `claim: partial`.
+
+Fixed by removing the clock from the question: the record now holds the content the file had at
+dispatch, and "produced" means *different from that*. The one cost is deliberate — a retry that
+writes byte-identical findings produced nothing new, and is recorded as `partial`.
 
 ### 3f · The receipt format
 

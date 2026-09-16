@@ -902,6 +902,15 @@ def pane_census(plan: Plan):
     return out
 
 
+def _findings_hash(p: Path):
+    """`sha256:<hex>` of a non-empty file, else None — the receipt's own form."""
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return None
+    return ("sha256:" + hashlib.sha256(data).hexdigest()) if data else None
+
+
 def launch(plan: Plan, t: Task, rts: dict, dry=False):
     decision, clause = t.route()
     rid = plan.run_id()
@@ -1019,6 +1028,11 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            # The reap budget is measured from THIS, not from started_epoch:
            # the wall clock can be stepped (smokin_clock explains why).
            **C.stamp(),
+           # WHAT FINDINGS.md HELD BEFORE THE WORKER RAN, so the emitter can
+           # tell new work from old by content. It used to compare the file's
+           # mtime with started_ns — two wall-clock readings — and a clock step
+           # back just after dispatch made fresh work read as stale.
+           "findings_before": _findings_hash(t.dir / "FINDINGS.md"),
            "placement": None, "pid_or_pane": None,
            # WHICH PERSONA the plan declared for this task, or null. This is the
            # key the pane history is looked up by, and writing it here is the

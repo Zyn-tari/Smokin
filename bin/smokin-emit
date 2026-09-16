@@ -123,13 +123,25 @@ def main() -> int:
         log(plan, event="emit-without-dispatch", task=task_id, source=source)
         return 0
 
-    # 2 · the completion gate, against the dispatch record's timestamp — an
-    # immutable reference. The draft compared against mtime(TASK.md), which the
-    # agent is contractually obliged to touch when it updates **Status:**; the
-    # natural write order then made the gate fail silently, forever.
+    # 2 · the completion gate. BY CONTENT, NOT BY CLOCK. The dispatch record
+    # holds what FINDINGS.md was before the worker ran (`findings_before`), and
+    # the task produced something when the file is non-empty and different.
+    # It used to compare the file's mtime with `started_ns`: both wall-clock
+    # readings, so on a machine whose clock is stepped back (measured
+    # 2026-09-16, ~2.2s every few minutes) fresh work written just after
+    # dispatch read as stale. The draft before THAT compared against
+    # mtime(TASK.md), which the agent must touch when it updates **Status:**.
+    # A record written before `findings_before` existed keeps the mtime rule,
+    # and the receipt says which rule decided.
     findings = tdir / "FINDINGS.md"
-    produced = findings.is_file() and findings.stat().st_size > 0 and \
-        findings.stat().st_mtime_ns > disp.get("started_ns", 0)
+    has_file = findings.is_file() and findings.stat().st_size > 0
+    if "findings_before" in disp:
+        produced = has_file and sha(findings) not in (None, disp.get("findings_before"))
+        produced_by = "content"
+    else:
+        produced = has_file and \
+            findings.stat().st_mtime_ns > disp.get("started_ns", 0)
+        produced_by = "mtime (the dispatch record predates findings_before)"
 
     terminal = frag.get("terminal", "ok")
     if terminal in ("ok", "failed") and not produced:
@@ -227,6 +239,7 @@ def main() -> int:
         "exit": frag.get("exit"),
         "started": disp.get("started"),
         "ended": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "produced_by": produced_by,
         "wall_s": (round(C.elapsed(disp)[0], 1) if "started_epoch" in disp else 0.0),
         "clock": (C.elapsed(disp)[1] if "started_epoch" in disp else None),
         "result": result,
