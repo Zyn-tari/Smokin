@@ -323,10 +323,10 @@ try:
     henv = {k: v for k, v in os.environ.items() if k not in ("SMOKIN_DEBRIEF_ACTIVE",)}
     henv.update({"PATH": f"{ROOT / 'bin'}:{os.environ['PATH']}", "SMOKIN_DEBRIEF_CMD": str(SLOW),
                  "SMOKIN_TASK_DIR": str(hdir)})
-    t0 = time.time()
+    t0 = time.monotonic()
     h = subprocess.run(["bash", str(HOOK)], input=hpay, capture_output=True, text=True,
                        timeout=30, env=henv)
-    took = time.time() - t0
+    took = time.monotonic() - t0
     chk("the hook exits 0", h.returncode, 0)
     chk(f"...in under 2s while a 4s summariser runs (took {took:.2f}s)", took < 2, True)
     for _ in range(30):
@@ -360,7 +360,7 @@ try:
     sdir = LAB / "stopdir"
     senv = dict(benv, SMOKIN_TASK_DIR=str(sdir))
     senv.pop("SMOKIN_TASK_ID", None)
-    t0 = time.time()
+    t0 = time.monotonic()
     subprocess.run(["bash", str(HOOK)], capture_output=True, text=True, timeout=30, env=senv,
                    input=json.dumps({"hook_event_name": "Stop", "transcript_path": str(tr)}))
     time.sleep(1.5)

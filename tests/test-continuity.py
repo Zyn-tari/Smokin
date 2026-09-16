@@ -616,6 +616,42 @@ chk("the emitter's wall_s survives a backward step (about 3s, not -97s)",
     2.5 <= float(rc_.get("wall_s") or 0) < 10, True)
 chk("...and names its clock", rc_.get("clock") in ("boottime", "monotonic"), True)
 
+# 7 · A tampered start must not abort the reap pass for everyone else.
+for bad in ("x", True, float("nan")):
+    try:
+        r = reap_with(f"tampered-{type(bad).__name__}", started_epoch=lambda e: e - 100,
+                      started_mono=bad)
+        raised = False
+    except Exception:
+        r, raised = None, True
+    chk(f"a started_mono of {bad!r} does not crash the reaper", raised, False)
+    has("...it falls back to the wall clock and says why", str((r or {}).get("clock")),
+        "not a number")
+
+# 8 · STATUS.json's elapsed_s is measured the same way, and names its clock.
+def status_elapsed(name, **over):
+    p = mkplan(name, [dict(tid="T1", owner="worker-T1")])
+    st = CL.stamp()
+    rec = {"task": "T1", "seq": "rTEST:T1:1", "run": "rTEST", "attempt": 1,
+           "runtime": "demo", "dispatch": "inproc", "placement": "inproc",
+           "started": "2026-01-01T00:00:00Z", "started_ns": 1,
+           "started_epoch": time.time() - 100, "budget_s": 600, **st}
+    rec.update(over)
+    for k in [k for k, v in over.items() if v is None]:
+        rec.pop(k)
+    (p / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps(rec))
+    subprocess.run([str(SMOKIN), "tick", str(p)], capture_output=True, text=True)
+    row = next(t for t in json.loads((p / "STATUS.json").read_text())["tasks"]
+               if t["id"] == "T1")
+    return row.get("elapsed_s"), row.get("elapsed_clock")
+el, how = status_elapsed("status-step")
+chk("STATUS elapsed_s ignores a 100s wall-clock step (reads a few seconds)",
+    el is not None and 0 <= el < 10, True)
+chk("...and names the monotonic clock", how in ("boottime", "monotonic"), True)
+el, how = status_elapsed("status-step-ctl", started_mono=None)
+chk("control · an unstamped record reads the wall-clock 100s", el is not None and el >= 99, True)
+chk("...and says it fell back", str(how).startswith("wall-fallback"), True)
+
 # 6 · A real dispatch carries the stamp this all depends on.
 p = mkplan("stamped", [dict(tid="T1", owner="worker-T1")])
 subprocess.run([str(SMOKIN), "tick", str(p)], capture_output=True, text=True)

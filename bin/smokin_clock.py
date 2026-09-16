@@ -63,6 +63,13 @@ def elapsed(rec: dict, default_epoch: float = 0.0):
     mono = rec.get("started_mono")
     if mono is None:
         return wall, "wall-fallback: the record carries no monotonic start"
+    # A record is a file anyone can edit. A start that is not a finite number
+    # (a string, a bool, NaN) is not measurable, and raising here would abort
+    # the whole reap pass for every other task — a new failure, which this
+    # module promises never to be.
+    if (isinstance(mono, bool) or not isinstance(mono, (int, float))
+            or mono != mono or mono in (float("inf"), float("-inf"))):
+        return wall, "wall-fallback: the record's monotonic start is not a number"
     here = boot_id()
     if here is None or rec.get("boot_id") != here:
         return wall, "wall-fallback: a different or unknown boot"

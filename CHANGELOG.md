@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — the clock change, finished after review · 2026-09-16
+
+An adversarial review of the monotonic-clock change (T14 in the suite-timing plan) upheld 16 of 18
+claims and refuted two. Both were real, and so were three smaller findings. Fixed here:
+
+- **Two harnesses still timed on the wall clock** — `test-wait-race.py` and
+  `test-subagent-pin-and-integration.py`. Worse than before: `wait`'s deadline had moved to the
+  monotonic clock while test-wait-race still measured it on the wall clock, so a backward step
+  during a wait made the measured time come out short and could fail `el >= 1.4`, `el >= 0.9` or
+  `el_bug >= 4`. All their timers are now `time.monotonic()`.
+- **A hand-edited `started_mono` that is not a finite number** (`"x"`, `true`, `NaN`) raised
+  inside `reap()` and aborted the pass for every task, or reaped wrongly. It now falls back to the
+  wall clock and says why — the module's own promise was never to be a new failure.
+- **STATUS.json's `elapsed_s` had no check**; putting it back on the wall clock passed everything.
+  It now does, and each row names its clock in `elapsed_clock`.
+- DESIGN.md's receipt example shows the `clock` key.
+
+Continuity 123 → 133 checks; undoing the STATUS and tampered-start fixes fails five of them. Suite
+43 passed, 0 failed.
+
+**Refuted and not fixed here, because it predates the change and needs a design decision:** the
+emitter decides a task produced its FINDINGS.md by comparing the file's modified time with the
+dispatch record's `started_ns` (`bin/smokin-emit`, the completion gate). Both are wall-clock times,
+so a backward step soon after dispatch makes a freshly written file look stale — `claim: partial`,
+`terminal: no-artefact`. Receipts' `started`/`ended` stay wall-clock too, so "ended before started"
+can still appear; only `wall_s` is now safe.
+
 ## Unreleased — three calibration sections poll every 0.1s · 2026-09-16
 
 `tests/run-tests.sh` §1 (happy path), §3 (idempotency) and §5 (emitter mutex) ran `smokin run`

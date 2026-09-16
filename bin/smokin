@@ -2564,6 +2564,10 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
             "wall_s": r.get("wall_s"),
             "elapsed_s": round(C.elapsed(d)[0]) if d.get("started_epoch")
                          and s == "running" else None,
+            # Which clock measured it — a fallback to the wall clock is named,
+            # the same as on a receipt.
+            "elapsed_clock": C.elapsed(d)[1] if d.get("started_epoch")
+                             and s == "running" else None,
             "budget_s": d.get("budget_s"),
         })
     base = I.read_baseline(plan.priv)

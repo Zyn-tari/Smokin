@@ -661,7 +661,7 @@ agent's own writes stops mattering.
  "claim":"done|blocked|partial",
  "runtime":"codewhale","dispatch":"pane","source":"wrapper-exit|claude-stop|codex-notify|...",
  "placement":{"workspace":"w7","tab":"w7:t2","pane":"w7:p9"},
- "exit":0,"started":"...Z","ended":"...Z","wall_s":412,
+ "exit":0,"started":"...Z","ended":"...Z","wall_s":412,"clock":"boottime|monotonic|wall-fallback: <why>",
  "result":"<final assistant text, UTF-8, truncated to 8192 bytes>",
  "artifacts":{"FINDINGS.md":"sha256:…","CHANGES.md":"sha256:…","QUESTIONS.md":null},
  "transcript":"tasks/T14/.smokin/transcript.log",

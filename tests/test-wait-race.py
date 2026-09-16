@@ -79,9 +79,9 @@ def mkplan(name, runtime_cmd="sleep 20"):
 
 
 def timed_wait(plan, **kw):
-    t = time.time()
+    t = time.monotonic()
     rc = S.wait(plan, poll=0.05, quiet=True, **kw)
-    return rc, time.time() - t
+    return rc, time.monotonic() - t
 
 
 print("=== the wait, with the landing already behind its baseline ===")
@@ -171,11 +171,11 @@ def run_with_landing(name, drop_since):
     argv = sys.argv
     sys.argv = ["smokin", "run", str(p), "--interval", "0.05",
                 "--max-ticks", "6", "--max-wait", MAXW]
-    t = time.time()
+    t = time.monotonic()
     try:
         rc = S.main()
     finally:
-        el = time.time() - t
+        el = time.monotonic() - t
         S.tick, S.wait, sys.argv = real_tick, real_wait, argv
         rec = p / ".smokin" / "dispatch" / "T1.json"
         try:
