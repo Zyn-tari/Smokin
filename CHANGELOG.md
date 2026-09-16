@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — a stepped wall clock no longer moves a reap · 2026-09-16
+
+Every elapsed-time decision Smokin made subtracted two `time.time()` readings: the reap budget,
+a receipt's `wall_s`, STATUS.json's `elapsed_s`, and `wait`'s deadline. The wall clock is not a
+stopwatch. On the WSL machine this was found on it is stepped back about 2.2 seconds every few
+minutes (`systemd-journald: Time jumped backwards`; `timesyncd` reports an offset of −2.2s against a
+Windows host clock that is not synced), and a step inside a budget moves the reap — backwards and
+a dead worker is reaped late, forwards and a live one is reaped early.
+
+**It was hiding in plain sight.** Two intermittent suite failures that day were this, not the
+`since` fix they were first suspected of: a reaping tick saw under 3s pass across a step and did
+not reap, and `test-continuity`'s `held` timer came up one step short. One receipt came out with
+`ended` before `started` and `wall_s: -1.0`. Found by an adversarial review that ran a clock
+monitor beside its measurements.
+
+- **`bin/smokin_clock.py`** stamps each dispatch record with a monotonic start
+  (`CLOCK_BOOTTIME`, which counts suspend like the budget always meant; plain monotonic where
+  that clock does not exist) and the boot it was taken in. `elapsed()` measures from it, and falls
+  back to the old wall-clock difference — saying so — when the record has no stamp, comes from
+  another boot, used another clock, or gives a negative difference. Falling back is the old
+  behaviour, never a new failure. `started_epoch` and the ISO times stay, for people.
+- **Reaped and emitted receipts carry `clock`**, naming what measured their `wall_s`.
+- `wait`'s deadline and the emitter's own `emit_ms` use `time.monotonic()`.
+- Not changed: `started_ns`, which orders records rather than timing them.
+
+`test-continuity.py` gains a section, "a wall-clock step does not move a reap": forward and
+backward steps, a record from another boot, a negative difference, the emitter, and a real
+dispatch carrying the stamp — each with a control decided the old way. Its four timers moved to
+`time.monotonic()`. Continuity 108 → 123 checks; with the reap put back on the wall clock, six of
+them fail. Suite: 43 passed, 0 failed.
+
 ## Unreleased — a result that lands mid-tick wakes the loop · 2026-09-16
 
 `smokin run` could sit out its whole wait ceiling — 30 seconds — for a result that was already on

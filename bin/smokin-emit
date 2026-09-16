@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smokin_usage as U                                       # noqa: E402
+import smokin_clock as C                                       # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 BUDGET_S = 2.0
@@ -92,7 +93,7 @@ def atomic_write(target: Path, data: str):
 
 
 def main() -> int:
-    t0 = time.time()
+    t0 = time.monotonic()
     if len(sys.argv) < 3:
         print("usage: smokin-emit <TASK_ID> <source>", file=sys.stderr)
         return 2
@@ -226,7 +227,8 @@ def main() -> int:
         "exit": frag.get("exit"),
         "started": disp.get("started"),
         "ended": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "wall_s": round(time.time() - disp.get("started_epoch", time.time()), 1),
+        "wall_s": (round(C.elapsed(disp)[0], 1) if "started_epoch" in disp else 0.0),
+        "clock": (C.elapsed(disp)[1] if "started_epoch" in disp else None),
         "result": result,
         "artifacts": {n: sha(tdir / n) for n in
                       ("FINDINGS.md", "CHANGES.md", "QUESTIONS.md")},
@@ -264,7 +266,7 @@ def main() -> int:
     extra = {"usage": usage} if usage else {}
     log(plan, event="emitted", task=task_id, seq=receipt["seq"],
         terminal=terminal, claim=claim, source=source,
-        emit_ms=int((time.time() - t0) * 1000), **extra)
+        emit_ms=int((time.monotonic() - t0) * 1000), **extra)
     return 0
 
 

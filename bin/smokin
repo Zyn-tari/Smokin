@@ -103,6 +103,7 @@ def _ver():
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import smokin_rulings as R                                          # noqa: E402
+import smokin_clock as C                                           # noqa: E402
 import smokin_invariants as I                                       # noqa: E402
 import smokin_usage as U                                            # noqa: E402
 import smokin_memory as M                                           # noqa: E402
@@ -1015,6 +1016,9 @@ def launch(plan: Plan, t: Task, rts: dict, dry=False):
            "dispatch": decision, "clause": clause, "runtime": t.runtime,
            "started": now(), "started_ns": time.time_ns(),
            "started_epoch": time.time(), "budget_s": t.budget,
+           # The reap budget is measured from THIS, not from started_epoch:
+           # the wall clock can be stepped (smokin_clock explains why).
+           **C.stamp(),
            "placement": None, "pid_or_pane": None,
            # WHICH PERSONA the plan declared for this task, or null. This is the
            # key the pane history is looked up by, and writing it here is the
@@ -1633,7 +1637,8 @@ def reap(plan: Plan, close_panes=False):
         tid = rec["task"]
         if (plan.root / "tasks" / tid / "RECEIPT.json").is_file():
             continue
-        if time.time() - rec.get("started_epoch", 0) < rec.get("budget_s", DEFAULT_BUDGET):
+        spent, clock = C.elapsed(rec)
+        if spent < rec.get("budget_s", DEFAULT_BUDGET):
             continue
         tr = plan.root / "tasks" / tid / ".smokin" / "transcript.log"
         text = tr.read_text(errors="replace") if tr.is_file() else ""
@@ -1661,7 +1666,7 @@ def reap(plan: Plan, close_panes=False):
                    "claim": "partial", "runtime": rec.get("runtime"),
                    "dispatch": rec.get("dispatch"), "source": "reaper", "exit": None,
                    "started": rec.get("started"), "ended": now(),
-                   "wall_s": round(time.time() - rec.get("started_epoch", 0), 1),
+                   "wall_s": round(spent, 1), "clock": clock,
                    "result": tail, "artifacts": {}, "placement": rec.get("placement")}
         # A reaped worker is one that ran out of budget, so most of the time it
         # printed no envelope and there is nothing to read. Sometimes it printed
@@ -2189,7 +2194,7 @@ def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False, since=None):
         print(f"smokin: no task {tid} in {plan.root} — there are: "
               f"{', '.join(sorted(plan.tasks)) or 'none'}", file=sys.stderr)
         return 2
-    deadline = (time.time() + timeout) if timeout else None
+    deadline = (time.monotonic() + timeout) if timeout else None
     before = plan_pulse(plan)
     while True:
         plan.__init__(plan.root)
@@ -2214,7 +2219,7 @@ def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False, since=None):
             if not quiet:
                 print("the plan moved")
             return 0
-        if deadline is not None and time.time() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             if not quiet:
                 print(f"timed out after {timeout:g}s"
                       + (f" — {tid} is {plan.state(tid)}" if tid else ""))
@@ -2557,7 +2562,7 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
             "claim": r.get("claim"), "terminal": r.get("terminal"),
             "result": (r.get("result") or "").strip().splitlines()[-1:] or [""],
             "wall_s": r.get("wall_s"),
-            "elapsed_s": round(time.time() - d["started_epoch"]) if d.get("started_epoch")
+            "elapsed_s": round(C.elapsed(d)[0]) if d.get("started_epoch")
                          and s == "running" else None,
             "budget_s": d.get("budget_s"),
         })

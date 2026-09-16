@@ -349,11 +349,11 @@ r = run_cli(["wait", "--task", "T2", "--timeout", "5"], p)
 chk("waiting on a PERSON returns at once rather than blocking forever", r.returncode, 5)
 has("...saying why", r.stdout, "will not settle on its own")
 
-t0 = time.time()
+t0 = time.monotonic()
 r = run_cli(["wait", "--task", "T1", "--timeout", "2", "--interval", "0.1"], p)
 chk("an unfinished agent task times out", r.returncode, 3)
 chk("...at roughly the timeout, not instantly and not forever",
-    1.0 < time.time() - t0 < 12.0, True)
+    1.0 < time.monotonic() - t0 < 12.0, True)
 has("...and says what it is still waiting on", r.stdout, "timed out")
 
 # Now let it finish, and prove the wait RETURNS on the settle rather than on the
@@ -365,11 +365,11 @@ for _ in range(12):
     if run_cli(["tick"], p).returncode != 1:
         break
     time.sleep(0.4)
-t0 = time.time()
+t0 = time.monotonic()
 r = run_cli(["wait", "--task", "T1", "--timeout", "30", "--interval", "0.1"], p)
 chk("a settled task returns immediately", r.returncode, 0)
 chk("...well inside the timeout, so it returned on the EVENT not the clock",
-    time.time() - t0 < 10.0, True)
+    time.monotonic() - t0 < 10.0, True)
 has("...naming the state it settled in", r.stdout, "verified")
 
 # A halt outranks the wait: a waiter must not sit through a stopped machine.
@@ -387,13 +387,13 @@ chk("a halted plan ends the wait rather than outlasting it", r.returncode, 4)
 p = mkplan("nohang", [dict(tid="T1", owner="worker-a", agent="impl")])
 run_cli(["tick"], p)                       # T1 goes out
 (p / ".smokin" / "spool").mkdir(exist_ok=True)
-t0 = time.time()
+t0 = time.monotonic()
 try:
     r = subprocess.run([sys.executable, str(SMOKIN), "run", "--max-ticks", "2",
                         "--max-wait", "1", "--interval", "0.1", str(p)],
                        capture_output=True, text=True, timeout=60)
     chk("`run` returns even when nothing on disk ever moves", True, True)
-    chk("...bounded by --max-wait, not by luck", time.time() - t0 < 55, True)
+    chk("...bounded by --max-wait, not by luck", time.monotonic() - t0 < 55, True)
 except subprocess.TimeoutExpired:
     chk("`run` returns even when nothing on disk ever moves", False, True)
 
@@ -452,9 +452,9 @@ for f in ("STATUS.json", "PROGRESS.md"):
     (p / f).unlink(missing_ok=True)
 (p / "tasks" / "T1" / "ANSWER.md").unlink(missing_ok=True)
 t = threading.Thread(target=answer_later, daemon=True); t.start()
-t0 = time.time()
+t0 = time.monotonic()
 r = run_cli(["run", "--max-ticks", "30", "--interval", "0.2", "--max-wait", "2"], p)
-held = time.time() - t0
+held = time.monotonic() - t0
 chk("`run` did NOT exit on the person — it outlived the answer's arrival",
     held > 3.5, True)
 has("...it says it is holding", r.stdout, "does not end because a person is needed")
@@ -530,6 +530,103 @@ chk("the agent's task needs no human", rows["T2"]["needs_human"], False)
 chk("...and is not owned by one", rows["T2"]["human_owned"], False)
 prog = (p / "PROGRESS.md").read_text()
 has("PROGRESS.md lists it under the section for people", prog, "T1")
+
+print("\n=== a wall-clock step does not move a reap ===")
+# MEASURED 2026-09-16 on the machine this suite was written on: the wall clock is
+# stepped back about 2.2s every few minutes, because timesyncd and an unsynced
+# Windows host disagree. Two suite failures that day were a reap decided on
+# `time.time() - started_epoch` across such a step, and `held` above was a
+# wall-clock timer too. The reap budget is now measured on a monotonic clock
+# stamped into the dispatch record (bin/smokin_clock.py). Every case below moves
+# the WALL-CLOCK start while the monotonic start says something else, and every
+# case has its control: the same record with no monotonic stamp, decided the old
+# way.
+sys.path.insert(0, str(ROOT / "bin"))
+import smokin_clock as CL                                            # noqa: E402
+
+
+def reap_with(name, **over):
+    p = mkplan(name, [dict(tid="T1", owner="worker-T1")])
+    st = CL.stamp()
+    rec = {"task": "T1", "seq": "rTEST:T1:1", "run": "rTEST", "attempt": 1,
+           "runtime": "demo", "dispatch": "inproc", "placement": "inproc",
+           "started": "2026-01-01T00:00:00Z", "started_ns": 1,
+           "started_epoch": time.time(), "budget_s": 5, **st}
+    for k, v in over.items():
+        if v is None:
+            rec.pop(k, None)
+        elif callable(v):
+            rec[k] = v(rec[k])
+        else:
+            rec[k] = v
+    (p / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps(rec))
+    S.reap(S.Plan(p))
+    f = p / "tasks" / "T1" / "RECEIPT.json"
+    return json.loads(f.read_text()) if f.is_file() else None
+
+
+# 1 · The wall clock says 100s have passed; the worker started a moment ago.
+r = reap_with("step-fwd", started_epoch=lambda e: e - 100)
+chk("a forward wall-clock step does not reap a live worker", r, None)
+r = reap_with("step-fwd-ctl", started_epoch=lambda e: e - 100, started_mono=None)
+chk("control · with no monotonic stamp the old rule reaps it", bool(r), True)
+chk("...and the receipt says the wall clock decided",
+    str((r or {}).get("clock", "")).startswith("wall-fallback"), True)
+
+# 2 · The wall clock was stepped back after the start, so wall time says
+# -100s; the monotonic clock says 10s, which is past the 5s budget.
+r = reap_with("step-back", started_epoch=lambda e: e + 100,
+              started_mono=lambda m: m - 10)
+chk("a backward wall-clock step does not keep a dead worker alive", bool(r), True)
+chk("...its wall_s is the real 10s, not a negative number",
+    9.5 <= float((r or {}).get("wall_s") or 0) < 30, True)
+chk("...measured on the monotonic clock",
+    (r or {}).get("clock") in ("boottime", "monotonic"), True)
+r = reap_with("step-back-ctl", started_epoch=lambda e: e + 100,
+              started_mono=None)
+chk("control · with no monotonic stamp the old rule never reaps it", r, None)
+
+# 3 · A record from another boot cannot be measured monotonically.
+r = reap_with("other-boot", boot_id="not-this-boot",
+              started_epoch=lambda e: e - 100)
+chk("a record from another boot falls back to the wall clock", bool(r), True)
+has("...and says why", str((r or {}).get("clock")), "boot")
+
+# 4 · A monotonic difference that comes out negative is not trusted.
+sec, how = CL.elapsed(dict(CL.stamp(), started_epoch=time.time() - 50,
+                           started_mono=CL.stamp()["started_mono"] + 1000))
+chk("a negative monotonic difference falls back", how.startswith("wall-fallback"), True)
+chk("...to the wall-clock figure", 49 < sec < 60, True)
+
+# 5 · The emitter writes wall_s too, and must not go negative either.
+p = mkplan("emit-step", [dict(tid="T1", owner="worker-T1")])
+st = CL.stamp()
+(p / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps({
+    "task": "T1", "seq": "rTEST:T1:1", "run": "rTEST", "attempt": 1,
+    "runtime": "demo", "dispatch": "inproc", "placement": "inproc",
+    "started": "2026-01-01T00:00:00Z", "started_ns": 1,
+    "started_epoch": time.time() + 100, "budget_s": 60,
+    **dict(st, started_mono=st["started_mono"] - 3)}))
+(p / "tasks" / "T1" / "OUT.md").write_text("done\n")
+subprocess.run([str(ROOT / "bin" / "smokin-emit"), "T1", "clock-test"],
+               input='{"terminal":"ok","exit":0}', text=True, capture_output=True,
+               env=dict(os.environ, SMOKIN_PLAN=str(p)))
+rc_ = json.loads((p / "tasks" / "T1" / "RECEIPT.json").read_text())
+chk("the emitter's wall_s survives a backward step (about 3s, not -97s)",
+    2.5 <= float(rc_.get("wall_s") or 0) < 10, True)
+chk("...and names its clock", rc_.get("clock") in ("boottime", "monotonic"), True)
+
+# 6 · A real dispatch carries the stamp this all depends on.
+p = mkplan("stamped", [dict(tid="T1", owner="worker-T1")])
+subprocess.run([str(SMOKIN), "tick", str(p)], capture_output=True, text=True)
+d = json.loads((p / ".smokin" / "dispatch" / "T1.json").read_text())
+chk("a real dispatch record carries a monotonic start and its boot",
+    [k in d for k in ("started_mono", "mono_clock", "boot_id")], [True, True, True])
+chk("...on this boot", d.get("boot_id"), CL.boot_id())
+for _ in range(40):
+    if (p / "tasks" / "T1" / "RECEIPT.json").is_file():
+        break
+    time.sleep(0.1)
 
 print()
 if fails:
