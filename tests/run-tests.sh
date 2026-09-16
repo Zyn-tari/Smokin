@@ -352,6 +352,18 @@ else
   cat "$LAB/paneline.out"
 fi
 
+# A RESULT THAT LANDS MID-TICK. `run` waited from a baseline read AFTER the
+# tick, so a receipt written during the tick was already inside it and the
+# loop sat out its whole ceiling. The race is caused here rather than waited
+# for, and the control with the fix removed must still show the stall.
+if python3 "$ROOT/tests/test-wait-race.py" > "$LAB/waitrace.out" 2>&1; then
+  n=$(count_pass "$LAB/waitrace.out")
+  ok "wait race: $n checks on a result landing mid-tick"
+else
+  bad "wait race" "see below"
+  cat "$LAB/waitrace.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

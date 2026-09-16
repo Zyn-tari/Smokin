@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — a result that lands mid-tick wakes the loop · 2026-09-16
+
+`smokin run` could sit out its whole wait ceiling — 30 seconds — for a result that was already on
+disk. After each tick the loop waits for the plan to move, and the wait read its baseline when it
+STARTED, which is after the tick. A worker that finished while the tick was still running had its
+receipt inside that baseline, so nothing differed afterwards and the wait ran to its cap. It never
+hung, because the wait is capped; every occurrence was the next task starting up to 30s late.
+
+**Found by timing the suite, not by a user.** `tests/test-reuse.py` ran in 12.5s most times and
+~40s on 3 of 14. An instrumented copy logged every wait: 1 in 105 timed out at 30.1s with an
+unreaped `RECEIPT.json` already present when it began — the thing it was waiting for had already
+happened. Four other waits started in the same state and woke only because some other file moved.
+
+**The fix is a second baseline, taken before the tick.** `plan_pulse(external_only=True)` reads
+only what arrives from outside the tick — receipts, spooled claims, questions, answers, a halt —
+and `run` takes it before each pass and hands it to `wait` as `since`. Anything outside the tick
+that moved since then wakes the wait at once. The old comparison stays, so a person editing a
+`TASK.md` mid-wait still wakes it. The worst case is one extra tick, which is idempotent.
+
+**The obvious fix was rejected as unsafe:** "skip the wait if an unreaped receipt exists". The tick
+only takes a verdict for a task it claimed or reaped in that pass and never re-judges a task that
+already has one, so a retry's fresh receipt would read as unreaped on every pass and the loop
+would spin through `--max-ticks` instead of waiting.
+
+New harness `tests/test-wait-race.py`, 19 checks. The race is CAUSED, not waited for: the worker
+only sleeps, and a tick wrapper writes the result at the end of the first pass. The real `run`
+then finishes well inside its ceiling, and the identical run with `since` removed at its one seam
+sits the ceiling out — the defect, reproduced on demand. Plus the external pulse in both
+directions, a person's edit still waking the wait, and `since` with nothing new still waiting.
+
+**And then the suite got faster.** With the race closed, `test-reuse.py` and `test-memory.py` poll
+at `--interval 0.1` instead of 1: 21.3s → 12.4s (15 runs, no outliers) and 21.2s → 4.1s. Before
+the fix the same change made `test-reuse.py` erratic — 12.5s usually, ~40s on 3 runs of 14 —
+because a faster loop hit the race more often. Suite: 117s → **91s**, 43 passed, 0 failed, with one more harness than before.
+
 ## Unreleased — the instruction reaches the pane · 2026-09-15
 
 A pane-dispatched task started its agent with **no instruction at all**. Every task gets a

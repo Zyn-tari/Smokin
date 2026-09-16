@@ -466,7 +466,7 @@ def run_plan(p, vanish="", ticks="12"):
     env = dict(os.environ, PATH=f"{STUB}:{os.environ['PATH']}",
                HERDR_ENV="1", HERDR_STUB_DIR=str(st), HERDR_STUB_VANISH=vanish,
                HERDR_WORKSPACE_ID="w9", HERDR_TAB_ID="w9:t1")
-    r = subprocess.run([str(SMOKIN), "run", str(p), "--interval", "1",
+    r = subprocess.run([str(SMOKIN), "run", str(p), "--interval", "0.1",
                         "--max-ticks", ticks], capture_output=True, text=True, env=env)
     calls = (st / "calls.log").read_text().splitlines() if (st / "calls.log").is_file() else []
     led = [json.loads(l) for l in
@@ -744,7 +744,7 @@ print("\n=== the negative control: a plan that never asked for any of this ===")
 # dispatches inproc — which is every plan that exists today.
 p = mkplan("inert", [dict(tid="T1", dispatch="inproc", blocks="T2"),
                      dict(tid="T2", dispatch="inproc", blocked="T1")])
-r = subprocess.run([str(SMOKIN), "run", str(p), "--interval", "1", "--max-ticks", "12"],
+r = subprocess.run([str(SMOKIN), "run", str(p), "--interval", "0.1", "--max-ticks", "12"],
                    capture_output=True, text=True)
 chk("it completes exactly as before", r.returncode, 0)
 chk("...no dispatch record carries a reuse key",

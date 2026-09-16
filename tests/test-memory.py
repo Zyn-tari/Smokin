@@ -149,7 +149,7 @@ def mkplan(name, tasks):
 def run(p, cmd="run", *extra, ticks="10"):
     args = [str(SMOKIN), cmd, str(p)]
     if cmd == "run":
-        args += ["--interval", "1", "--max-ticks", ticks]
+        args += ["--interval", "0.1", "--max-ticks", ticks]
     args += list(extra)
     return subprocess.run(args, capture_output=True, text=True)
 
@@ -561,7 +561,7 @@ st_dir = pp / ".stub"
 (st_dir / "panes").mkdir(parents=True)
 env = dict(os.environ, PATH=f"{STUB}:{os.environ['PATH']}", HERDR_ENV="1",
            HERDR_STUB_DIR=str(st_dir), HERDR_WORKSPACE_ID="w9", HERDR_TAB_ID="w9:t1")
-subprocess.run([str(SMOKIN), "run", str(pp), "--interval", "1", "--max-ticks", "12"],
+subprocess.run([str(SMOKIN), "run", str(pp), "--interval", "0.1", "--max-ticks", "12"],
                capture_output=True, text=True, env=env)
 chk("the pane task with a recall actually ran", (pp / "tasks" / "T3" / "LINE.txt").is_file(), True)
 has("...and the whole line survived the shell", line_of(pp, "T3"), "MEMORY.md")
@@ -601,7 +601,7 @@ S.M.append(ev / ".smokin", S.M.make(
     "grep -q NEVERTHERE tasks/T1/FINDINGS.md", run=S.Plan(ev).run_id()))
 ev_stub = ev / ".stub"
 (ev_stub / "panes").mkdir(parents=True)
-subprocess.run([str(SMOKIN), "run", str(ev), "--interval", "1", "--max-ticks", "12"],
+subprocess.run([str(SMOKIN), "run", str(ev), "--interval", "0.1", "--max-ticks", "12"],
                capture_output=True, text=True,
                env=dict(os.environ, PATH=f"{STUB}:{os.environ['PATH']}", HERDR_ENV="1",
                         HERDR_STUB_DIR=str(ev_stub), HERDR_WORKSPACE_ID="w9",

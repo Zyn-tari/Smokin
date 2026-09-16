@@ -2103,8 +2103,14 @@ def verify(plan: Plan, only=None):
 
 # ── the tick ────────────────────────────────────────────────────────────────
 
-def plan_pulse(plan: Plan):
+def plan_pulse(plan: Plan, external_only: bool = False):
     """Everything a waiter could possibly be waiting FOR, as one comparable value.
+
+    `external_only` keeps just what arrives from OUTSIDE the tick — receipts,
+    spooled claims, questions, answers, a halt — and drops what the tick writes
+    itself (dispatch records, verdicts, STATUS.json, TASK.md status lines). The
+    run loop takes that reading BEFORE a pass so the wait after it can see what
+    landed DURING the pass; see `wait`'s `since`.
 
     Deliberately derived from files and nothing else, for the same reason the
     tick is: there is no resident orchestrator to ask, and a waiter that held
@@ -2113,7 +2119,7 @@ def plan_pulse(plan: Plan):
     status by hand — all of them move a file, so all of them move this.
     """
     marks = []
-    for rel in ("spool/inbox", "dispatch"):
+    for rel in (("spool/inbox",) if external_only else ("spool/inbox", "dispatch")):
         d = plan.priv / rel
         if d.is_dir():
             for f in sorted(d.iterdir()):
@@ -2121,7 +2127,8 @@ def plan_pulse(plan: Plan):
                     marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
                 except OSError:
                     pass
-    for f in (plan.priv / "HALT.json", plan.root / "STATUS.json"):
+    for f in ((plan.priv / "HALT.json",) if external_only
+              else (plan.priv / "HALT.json", plan.root / "STATUS.json")):
         try:
             marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
         except OSError:
@@ -2131,8 +2138,10 @@ def plan_pulse(plan: Plan):
         for d in sorted(td.iterdir()):
             # ANSWER.md is in this list for the same reason RECEIPT.json is:
             # it is a thing arriving from outside that the plan can move on.
-            for name in ("RECEIPT.json", "VERDICT.json", "TASK.md",
-                         "QUESTIONS.md", "ANSWER.md"):
+            for name in (("RECEIPT.json", "QUESTIONS.md", "ANSWER.md")
+                         if external_only else
+                         ("RECEIPT.json", "VERDICT.json", "TASK.md",
+                          "QUESTIONS.md", "ANSWER.md")):
                 f = d / name
                 try:
                     marks.append((str(f), f.stat().st_mtime_ns, f.stat().st_size))
@@ -2154,7 +2163,7 @@ def task_settled(plan: Plan, tid):
     return None
 
 
-def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False):
+def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False, since=None):
     """Block until there is something new to look at. Returns an exit code.
 
     THIS IS THE CURATOR'S PRIMITIVE, and it was missing. Operators were writing
@@ -2165,6 +2174,16 @@ def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False):
 
     It still holds no state and starts nothing. It watches the plan directory,
     because the plan directory is where every answer already is.
+
+    `since` CLOSES A MISSED-WAKE RACE. `before` is read when the wait STARTS,
+    which in `run` is right after a tick. A worker that finishes DURING that
+    tick — after its reap, before its end — has its receipt inside `before`, so
+    nothing ever differs and the wait sat out its whole ceiling for a result
+    that had already arrived. MEASURED 2026-09-16: 1 wait in 105 across ten
+    runs of tests/test-reuse.py timed out at 30.1s with an unreaped RECEIPT
+    already on disk. `run` now passes an external-only pulse taken BEFORE the
+    tick, and anything outside the tick that moved since then wakes the wait at
+    once. The worst case is one extra tick, which is idempotent.
     """
     if tid is not None and tid not in plan.tasks:
         print(f"smokin: no task {tid} in {plan.root} — there are: "
@@ -2189,7 +2208,9 @@ def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False):
                 if not quiet:
                     print(f"{tid} {got}")
                 return 0 if got == "verified" else 1
-        elif plan_pulse(plan) != before:
+        elif (plan_pulse(plan) != before
+              or (since is not None
+                  and plan_pulse(plan, external_only=True) != since)):
             if not quiet:
                 print("the plan moved")
             return 0
@@ -3449,6 +3470,7 @@ def main():
         #   0  complete      3  stuck         4  halted
         #   5  waiting on a person            1  in flight, keep going
         for i in range(a.max_ticks):
+            since = plan_pulse(plan, external_only=True)
             rc = tick(plan, a.dry_run, a.close)
             # 5 IS NOT A REASON TO STOP. A person is not a failure and not the
             # end of the work — they are the answer to a question the plan could
@@ -3473,7 +3495,7 @@ def main():
                 # learn. A halt is the exception: it outranks the wait.
                 while True:
                     w = wait(plan, timeout=(a.max_wait or MAX_WAIT_S),
-                             poll=max(a.interval, 0.05), quiet=True)
+                             poll=max(a.interval, 0.05), quiet=True, since=since)
                     if w == 4:
                         return tick(plan, a.dry_run, a.close)
                     if w == 0:
@@ -3493,7 +3515,7 @@ def main():
             # REAPED it on budget never happens. The wait is an optimisation over
             # the old blind sleep, never a gate on the loop.
             wait(plan, timeout=(a.max_wait or MAX_WAIT_S),
-                 poll=max(a.interval, 0.05), quiet=True)
+                 poll=max(a.interval, 0.05), quiet=True, since=since)
             plan = Plan(root)
         print("max ticks reached")
         return 1
