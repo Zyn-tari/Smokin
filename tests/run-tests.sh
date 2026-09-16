@@ -48,7 +48,7 @@ echo
 
 # ── 1 · the happy path ──────────────────────────────────────────────────────
 P="$LAB/happy"; newplan "$P" 60
-"$SMOKIN" run "$P" --interval 1 --max-ticks 10 >/dev/null 2>&1; rc=$?
+"$SMOKIN" run "$P" --interval 0.1 --max-ticks 10 >/dev/null 2>&1; rc=$?
 chk "happy path completes"            "$rc" "0"
 chk "T1 verdict passed"               "$(python3 -c "import json;print(json.load(open('$P/tasks/T1/VERDICT.json'))['pass'])" 2>/dev/null)" "True"
 chk "T2 ran only after T1 verified"   "$(python3 -c "import json;print(json.load(open('$P/tasks/T2/RECEIPT.json'))['claim'])" 2>/dev/null)" "done"
@@ -69,7 +69,7 @@ chk "a missing receipt became a result"  "$([ -f "$P/tasks/T1/VERDICT.json" ] &&
 
 # ── 3 · idempotency ─────────────────────────────────────────────────────────
 P="$LAB/idem"; newplan "$P" 60
-"$SMOKIN" run "$P" --interval 1 --max-ticks 10 >/dev/null 2>&1
+"$SMOKIN" run "$P" --interval 0.1 --max-ticks 10 >/dev/null 2>&1
 before="$(sha1sum "$P/STATUS.json" | cut -d' ' -f1)"
 r1="$("$SMOKIN" tick "$P" 2>&1)"; r2="$("$SMOKIN" tick "$P" 2>&1)"
 chk "re-ticking a finished plan is a no-op" "$(echo "$r1" | grep -c 'dispatch ')" "0"
@@ -111,7 +111,7 @@ wait "$holder" 2>/dev/null
 
 # ── 5 · the emitter's mutex ─────────────────────────────────────────────────
 P="$LAB/dup"; newplan "$P" 60
-"$SMOKIN" run "$P" --interval 1 --max-ticks 10 >/dev/null 2>&1
+"$SMOKIN" run "$P" --interval 0.1 --max-ticks 10 >/dev/null 2>&1
 first="$(sha1sum "$P/tasks/T1/RECEIPT.json" | cut -d' ' -f1)"
 SMOKIN_PLAN="$P" printf '{"terminal":"ok","exit":0}' | \
   SMOKIN_PLAN="$P" "$ROOT/bin/smokin-emit" T1 second-writer >/dev/null 2>&1

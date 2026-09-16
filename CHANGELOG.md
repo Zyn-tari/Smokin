@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — three calibration sections poll every 0.1s · 2026-09-16
+
+`tests/run-tests.sh` §1 (happy path), §3 (idempotency) and §5 (emitter mutex) ran `smokin run`
+with `--interval 1`. The wait ends when a file moves, and since the `since` fix it wakes for a
+result that lands mid-tick, so a one-second poll only added latency. Now `--interval 0.1`; nothing
+else changed, no sleep included. Suite 96.6s → 91.4s (monotonic, one run each — same-commit runs
+earlier varied by about 3s), 43 passed, 0 failed.
+
 ## Unreleased — a stepped wall clock no longer moves a reap · 2026-09-16
 
 Every elapsed-time decision Smokin made subtracted two `time.time()` readings: the reap budget,
