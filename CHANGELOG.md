@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — the content gate cannot hang, crash, or be fooled · 2026-09-17
+
+The adversarial review of the content-based completion gate (T16 in the suite-timing plan) upheld
+17 of 19 claims and broke dispatch in two ways, both introduced by that change:
+
+- **A FIFO named FINDINGS.md hung `smokin tick`**, and a file larger than memory — or a symlink to
+  `/dev/zero` — killed it with `MemoryError`. Dispatch read the path whole with `read_bytes()`.
+  A healthy task in the same tick was not dispatched either, and the plan stayed stuck.
+- **A malformed `findings_before`** (a number, a list, an upper-case hash, an empty string — nine
+  forms tried) was treated as "different", so an untouched FINDINGS.md read as `done`.
+
+Fixed:
+
+- **New `bin/smokin_digest.py`.** `file_sha()` opens with `O_NONBLOCK`, checks with `fstat` that it
+  opened a regular file, and hashes in 1 MiB chunks. It returns a `sha256:` hash, None for an
+  absent or empty file, or `"unhashable: <why>"` — never a guess, never a hang. Dispatch records the
+  result; `_findings_hash` also catches anything unexpected so a dispatch cannot fail on it.
+- **The emitter uses the content rule only when `findings_before` is null or a real hash.**
+  Anything else falls back to the mtime rule, and `produced_by` names the unusable value.
+- **The emitter's artifact hashes go through the same helper**, which also fixes an older hang on a
+  FIFO among the artifacts, and FINDINGS.md is now read once per emit instead of twice.
+
+`test-continuity.py`: a FIFO, a link to `/dev/zero`, a directory and an unreadable file at
+FINDINGS.md each leave the tick unstalled, dispatch both T1 and a healthy T2, and record
+"unhashable"; six unusable `findings_before` values no longer read an untouched file as done; a
+FIFO does not hang the emitter. Continuity 143 → 172 checks. Putting the whole-file read back
+fails five of them (the FIFO stalls the tick and the healthy task beside it); trusting any
+`findings_before` as a hash fails twelve. Suite 43 passed, 0 failed, 100.4s — the new cases run
+real ticks.
+
+Still open, and older than any of this (T16): the emitter's 2.0s budget is declared but not
+enforced; a leftover `emit.lock` means a retry gets no receipt; `attempt` and `seq` are always 1.
+
 ## Unreleased — "produced" is decided by content, not by clock · 2026-09-16
 
 The emitter's completion gate decided a task had produced its FINDINGS.md by comparing the file's

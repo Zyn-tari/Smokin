@@ -662,6 +662,16 @@ Fixed by removing the clock from the question: the record now holds the content 
 dispatch, and "produced" means *different from that*. The one cost is deliberate — a retry that
 writes byte-identical findings produced nothing new, and is recorded as `partial`.
 
+> **FINDING, 2026-09-16 — the first version read FINDINGS.md whole, inside the tick.** A FIFO at that
+> path hung the tick, and a file larger than memory (or a link to `/dev/zero`) killed it — a stuck
+> tick dispatches nothing, healthy tasks included. A malformed `findings_before` was treated as
+> "different", so an untouched file read as done.
+
+The hash is now taken by `bin/smokin_digest.py`: it opens without blocking, checks that what it
+opened is a regular file, and reads in chunks. What cannot be hashed is recorded as
+`"unhashable: <why>"`. The content rule is used only when `findings_before` is null or a real
+`sha256:` hash; anything else falls back to the mtime rule, and `produced_by` says why.
+
 ### 3f · The receipt format
 
 `schema: "smokin.receipt/1"`. Two status fields, not one:

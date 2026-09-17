@@ -698,6 +698,9 @@ def h(text):
     return "sha256:" + _hl.sha256(text.encode()).hexdigest()
 
 
+old = "# T1\n\nlast attempt\n"
+
+
 r = emit_with("stale-new", findings="# T1\n\nfound it\n", before=None)
 chk("new work written after a backward step reads as done", r.get("claim"), "done")
 chk("...decided by content", r.get("produced_by"), "content")
@@ -705,15 +708,78 @@ r = emit_with("stale-ctl", findings="# T1\n\nfound it\n")
 chk("control · a record without findings_before reads it as partial (the old rule)",
     r.get("claim"), "partial")
 has("...and says the old rule decided", str(r.get("produced_by")), "mtime")
-old = "# T1\n\nlast attempt\n"
 r = emit_with("stale-retry-same", preexisting=old, before=h(old))
 chk("a retry that left FINDINGS.md unchanged produced nothing", r.get("claim"), "partial")
 r = emit_with("stale-retry-new", preexisting=old, before=h(old), findings="# T1\n\nthis attempt\n")
 chk("a retry that changed FINDINGS.md produced something", r.get("claim"), "done")
 r = emit_with("stale-empty", findings="", before=None)
 chk("an empty FINDINGS.md is still nothing", r.get("claim"), "partial")
-r = emit_with("stale-malformed", findings="# T1\n\nfound it\n", before=42)
-chk("a malformed findings_before does not block real work", r.get("claim"), "done")
+# A findings_before that is neither null nor a real hash cannot be compared.
+# Treating it as "different" marked an UNTOUCHED file done (T16 tried nine
+# forms, all read done). It falls back to the mtime rule and says why — and in
+# this fixture started_ns is ahead of every write, so the old rule reads partial.
+for n, bad in enumerate((42, "", "SHA256:ABC", ["x"], "unhashable: not a regular file",
+                         "sha256:" + "0" * 63)):
+    r = emit_with(f"stale-malformed-{n}", preexisting=old, before=bad)
+    chk(f"an unusable findings_before ({bad!r}) does not make an untouched file done",
+        r.get("claim"), "partial")
+    has("...and the receipt says it fell back", str(r.get("produced_by")), "unusable")
+
+# Whatever sits at FINDINGS.md must not stall a tick. A FIFO hung it, and a
+# file bigger than memory (or a link to /dev/zero) killed it — and a stuck tick
+# dispatches nothing, the healthy task beside it included.
+import stat as _stat
+for kind in ("fifo", "devzero", "directory", "unreadable"):
+    p = mkplan(f"odd-{kind}", [dict(tid="T1", owner="worker-T1"),
+                               dict(tid="T2", owner="worker-T2")])
+    f = p / "tasks" / "T1" / "FINDINGS.md"
+    if kind == "fifo":
+        os.mkfifo(f)
+    elif kind == "devzero":
+        f.symlink_to("/dev/zero")
+    elif kind == "directory":
+        f.mkdir()
+    else:
+        f.write_text("secret\n")
+        f.chmod(0)
+    t0 = time.monotonic()
+    try:
+        subprocess.run([str(SMOKIN), "tick", str(p)], capture_output=True, text=True, timeout=20)
+        hung = False
+    except subprocess.TimeoutExpired:
+        hung = True
+    chk(f"a {kind} at FINDINGS.md does not stall the tick", hung, False)
+    recs = {r.stem: json.loads(r.read_text()) for r in (p / ".smokin" / "dispatch").glob("*.json")}
+    chk(f"...T1 is still dispatched", "T1" in recs, True)
+    chk(f"...and so is the healthy T2 beside it", "T2" in recs, True)
+    has(f"...and T1's record names it unhashable",
+        str(recs.get("T1", {}).get("findings_before")), "unhashable")
+    if kind == "unreadable":
+        f.chmod(0o644)
+    if kind != "directory":
+        for _ in range(40):
+            if all((p / "tasks" / t / "RECEIPT.json").is_file() for t in ("T1", "T2")):
+                break
+            time.sleep(0.1)
+
+# The emitter hashes its artifacts too; a FIFO among them hung it.
+p = mkplan("emit-fifo", [dict(tid="T1", owner="worker-T1")])
+os.mkfifo(p / "tasks" / "T1" / "FINDINGS.md")
+(p / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps({
+    "task": "T1", "seq": "rTEST:T1:1", "run": "rTEST", "attempt": 1, "runtime": "demo",
+    "dispatch": "inproc", "placement": "inproc", "started": "2026-01-01T00:00:00Z",
+    "started_ns": 1, "started_epoch": time.time(), "budget_s": 60, "findings_before": None,
+    **CL.stamp()}))
+try:
+    subprocess.run([str(ROOT / "bin" / "smokin-emit"), "T1", "fifo-test"],
+                   input='{"terminal":"ok","exit":0}', text=True, capture_output=True,
+                   timeout=20, env=dict(os.environ, SMOKIN_PLAN=str(p)))
+    hung = False
+except subprocess.TimeoutExpired:
+    hung = True
+chk("a FIFO at FINDINGS.md does not hang the emitter", hung, False)
+r = json.loads((p / "tasks" / "T1" / "RECEIPT.json").read_text()) if not hung else {}
+chk("...and it is not counted as produced work", r.get("claim"), "partial")
 
 p = mkplan("stamped-findings", [dict(tid="T1", owner="worker-T1")])
 (p / "tasks" / "T1" / "FINDINGS.md").write_text(old)

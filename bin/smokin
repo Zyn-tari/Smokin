@@ -104,6 +104,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import smokin_rulings as R                                          # noqa: E402
 import smokin_clock as C                                           # noqa: E402
+import smokin_digest as D                                          # noqa: E402
 import smokin_invariants as I                                       # noqa: E402
 import smokin_usage as U                                            # noqa: E402
 import smokin_memory as M                                           # noqa: E402
@@ -903,12 +904,13 @@ def pane_census(plan: Plan):
 
 
 def _findings_hash(p: Path):
-    """`sha256:<hex>` of a non-empty file, else None — the receipt's own form."""
+    """What FINDINGS.md holds, in smokin_digest's terms. Never raises: a
+    dispatch must not fail, or stall the tick for every other task, because of
+    what happens to sit at this path."""
     try:
-        data = p.read_bytes()
-    except OSError:
-        return None
-    return ("sha256:" + hashlib.sha256(data).hexdigest()) if data else None
+        return D.file_sha(p)
+    except Exception as e:                       # noqa: BLE001 — see docstring
+        return f"unhashable: {e.__class__.__name__}"
 
 
 def launch(plan: Plan, t: Task, rts: dict, dry=False):

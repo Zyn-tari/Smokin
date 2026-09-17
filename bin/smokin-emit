@@ -21,7 +21,6 @@ Zero dependencies. Never raises into the caller: an emitter that crashes a
 worker is worse than a missing receipt, because the reaper handles a missing
 receipt and nothing handles a corrupted run.
 """
-import hashlib
 import json
 import os
 import re
@@ -32,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smokin_usage as U                                       # noqa: E402
 import smokin_clock as C                                       # noqa: E402
+import smokin_digest as D                                      # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 BUDGET_S = 2.0
@@ -53,11 +53,18 @@ def log(plan: Path, **kw):
         pass
 
 
+_SHA_CACHE = {}
+
+
 def sha(p: Path):
-    try:
-        return "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
-    except OSError:
-        return None
+    """The receipt's artifact hash, or None. Through smokin_digest, so a FIFO
+    or a huge file among the artifacts cannot hang or exhaust the emitter, and
+    cached so FINDINGS.md is read once per emit, not twice."""
+    key = str(p)
+    if key not in _SHA_CACHE:
+        v = D.file_sha(p)
+        _SHA_CACHE[key] = v if (v and D.HASH_RE.match(v)) else None
+    return _SHA_CACHE[key]
 
 
 # The worker's own **Status:** in TASK.md, upper-cased, "" if unreadable. Same
@@ -133,15 +140,22 @@ def main() -> int:
     # mtime(TASK.md), which the agent must touch when it updates **Status:**.
     # A record written before `findings_before` existed keeps the mtime rule,
     # and the receipt says which rule decided.
+    # A `findings_before` that is not null or a real hash — "unhashable: …"
+    # from dispatch, or a hand-edited value — cannot be compared, and treating
+    # it as "different" would mark an untouched file done. It falls back to
+    # the mtime rule and the receipt says why.
     findings = tdir / "FINDINGS.md"
     has_file = findings.is_file() and findings.stat().st_size > 0
-    if "findings_before" in disp:
-        produced = has_file and sha(findings) not in (None, disp.get("findings_before"))
+    before = disp.get("findings_before")
+    if "findings_before" in disp and D.usable(before):
+        produced = sha(findings) is not None and sha(findings) != before
         produced_by = "content"
     else:
         produced = has_file and \
             findings.stat().st_mtime_ns > disp.get("started_ns", 0)
-        produced_by = "mtime (the dispatch record predates findings_before)"
+        produced_by = ("mtime (the dispatch record predates findings_before)"
+                       if "findings_before" not in disp else
+                       f"mtime (findings_before is unusable: {str(before)[:80]})")
 
     terminal = frag.get("terminal", "ok")
     if terminal in ("ok", "failed") and not produced:
