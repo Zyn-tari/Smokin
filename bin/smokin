@@ -481,12 +481,22 @@ class Plan:
             r = json.loads(p.read_text())
         except ValueError:
             return {"stale": True, "why": "unparseable"}
+        # EVERY TICK READS THIS, so it must not read an artifact whole. The
+        # first version did (`read_bytes()`), so a large artifact cost its full
+        # size in memory on every pass, and one larger than memory killed
+        # `status` and `tick` — the hazard T16 found in dispatch, in a second
+        # place. (A FIFO never hung this one: its `is_file()` check skipped
+        # non-regular files. That was tested, 2026-09-17, and the first comment
+        # here said otherwise.) smokin_digest hashes in chunks. Missing,
+        # unhashable or different all mean the same as before: stale.
         for name, recorded in (r.get("artifacts") or {}).items():
             if recorded is None:
                 continue
-            f = self.root / "tasks" / tid / name
-            if not f.is_file() or "sha256:" + hashlib.sha256(f.read_bytes()).hexdigest() != recorded:
-                return {"stale": True, "why": f"{name} hash mismatch", **r}
+            current = D.file_sha(self.root / "tasks" / tid / name)
+            if current != recorded:
+                why = ("missing" if current is None else
+                       current if current.startswith("unhashable") else "hash mismatch")
+                return {"stale": True, "why": f"{name} {why}", **r}
         return r
 
     def verdict(self, tid):

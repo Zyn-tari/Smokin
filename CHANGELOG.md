@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — the receipt check reads no artifact whole · 2026-09-17
+
+`Plan.receipt` re-hashes every artifact a receipt lists, on every `status` and `tick`, and it read
+each one whole with `read_bytes()`: a large artifact cost its full size in memory on every pass,
+and one larger than memory killed the command — the hazard the review of the content gate found in
+dispatch, in a second place. It now hashes through `smokin_digest`. A missing, unhashable or
+changed artifact still makes the receipt stale, and the reason now says which.
+
+**Corrected before commit:** the first version of this fix, and its tests, claimed a FIFO where an
+artifact had been hung `status`. It did not — the old code checked `is_file()` first and skipped
+non-regular files. A mutation run (the old read put back) showed the FIFO checks passing on the old
+code, so they were not evidence. The check that tells old from new is a 1 GiB sparse artifact under
+a 600 MiB address-space limit: the old code dies with `MemoryError`; the new one answers.
+
+`test-continuity.py` gains "a receipt check reads no artifact whole" (unchanged, changed, missing,
+FIFO, 1 GiB). Continuity 172 → 183 checks; the old read fails three of them. Suite 43 passed,
+0 failed.
+
 ## Unreleased — the docs say what the emitter and retries really do · 2026-09-17
 
 Decided by the owner after the older issues were confirmed against the code. No behaviour changes.

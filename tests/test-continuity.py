@@ -725,6 +725,68 @@ for n, bad in enumerate((42, "", "SHA256:ABC", ["x"], "unhashable: not a regular
         r.get("claim"), "partial")
     has("...and the receipt says it fell back", str(r.get("produced_by")), "unusable")
 
+print("\n=== a receipt check reads no artifact whole ===")
+# Plan.receipt re-hashes every artifact a receipt lists, on every tick. It read
+# each one whole, so an artifact larger than memory killed `status` and `tick`.
+# (A FIFO did not hang it — the old code skipped non-regular files — so the FIFO
+# cases below guard the new code, not the old defect; the 1 GiB case is the one
+# that tells them apart.) Staleness must mean exactly what it meant before.
+def receipt_plan(name):
+    p = mkplan(name, [dict(tid="T1", owner="worker-T1")])
+    f = p / "tasks" / "T1" / "FINDINGS.md"
+    f.write_text("# T1\n\nthe work\n")
+    (p / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps({
+        "schema": "smokin.receipt/1", "seq": "rTEST:T1:1", "run": "rTEST", "task": "T1",
+        "attempt": 1, "terminal": "ok", "claim": "done", "source": "test",
+        "artifacts": {"FINDINGS.md": h("# T1\n\nthe work\n"), "CHANGES.md": None}}))
+    return p, f
+
+p, f = receipt_plan("rcpt-same")
+r = S.Plan(p).receipt("T1")
+chk("an unchanged artifact leaves the receipt fresh", bool(r.get("stale")), False)
+p, f = receipt_plan("rcpt-changed")
+f.write_text("# T1\n\nsomething else\n")
+r = S.Plan(p).receipt("T1")
+chk("a changed artifact makes it stale", bool(r.get("stale")), True)
+has("...and says so", str(r.get("why")), "hash mismatch")
+p, f = receipt_plan("rcpt-missing")
+f.unlink()
+r = S.Plan(p).receipt("T1")
+chk("a missing artifact makes it stale", bool(r.get("stale")), True)
+has("...and says it is missing", str(r.get("why")), "missing")
+for verb in ("status", "tick"):
+    p, f = receipt_plan(f"rcpt-fifo-{verb}")
+    f.unlink()
+    os.mkfifo(f)
+    try:
+        subprocess.run([str(SMOKIN), verb, str(p)], capture_output=True, text=True, timeout=20)
+        hung = False
+    except subprocess.TimeoutExpired:
+        hung = True
+    chk(f"a FIFO where an artifact was does not hang `smokin {verb}`", hung, False)
+r = S.Plan(p).receipt("T1")
+chk("...and the receipt reads as stale", bool(r.get("stale")), True)
+has("...naming why", str(r.get("why")), "unhashable")
+
+# A 1 GiB artifact (sparse, so it costs no disk) under a 600 MiB address-space
+# limit: reading it whole fails with MemoryError; hashing it in chunks does not.
+import resource as _res
+p, f = receipt_plan("rcpt-huge")
+with open(f, "wb") as fh:
+    fh.truncate(1 << 30)
+(p / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps({
+    "schema": "smokin.receipt/1", "seq": "rTEST:T1:1", "run": "rTEST", "task": "T1",
+    "attempt": 1, "terminal": "ok", "claim": "done", "source": "test",
+    "artifacts": {"FINDINGS.md": "sha256:" + "0" * 64}}))
+def _cap():
+    _res.setrlimit(_res.RLIMIT_AS, (600 << 20, 600 << 20))
+r = subprocess.run([str(SMOKIN), "status", str(p)], capture_output=True, text=True,
+                   timeout=120, preexec_fn=_cap)
+chk("a 1 GiB artifact does not crash `smokin status` under a 600 MiB limit",
+    "MemoryError" in r.stderr, False)
+has("...and status still prints its summary line", r.stdout, "verified")
+f.unlink()
+
 # Whatever sits at FINDINGS.md must not stall a tick. A FIFO hung it, and a
 # file bigger than memory (or a link to /dev/zero) killed it — and a stuck tick
 # dispatches nothing, the healthy task beside it included.
