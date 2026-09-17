@@ -15,7 +15,11 @@ Order of operations is normative and each step exists because of a defect:
  2. Apply the completion gate against an IMMUTABLE reference point.
  3. Write the receipt atomically: tmp -> fsync file -> fsync dir -> rename.
  4. Publish the pointer into the spool, atomically, same filesystem.
- 5. Exit inside a hard budget. No retries, no network.
+ 5. No retries and no network. There is NO enforced time limit: a two-second
+    budget constant was declared here from the start and never read by anything
+    (found 2026-09-16), and enforcing one now would let a slow disk cost a
+    finished task its receipt. An emitter that hangs is covered the same way
+    a worker that hangs is: the reaper writes the receipt at the task's budget.
 
 Zero dependencies. Never raises into the caller: an emitter that crashes a
 worker is worse than a missing receipt, because the reaper handles a missing
@@ -34,7 +38,6 @@ import smokin_clock as C                                       # noqa: E402
 import smokin_digest as D                                      # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-BUDGET_S = 2.0
 RESULT_MAX = 8192
 
 

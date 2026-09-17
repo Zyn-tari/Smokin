@@ -17,7 +17,11 @@ smokin — an idempotent tick that dispatches a Grillin plan from disk.
     smokin invariants        resolve and print the plan-level invariants
              --recapture     take a new baseline, deliberately and on the record
     smokin resume            clear a halt, after a human has read it
-    smokin reset --run <id>  retire a run's receipts and dispatch records
+    smokin reset --run <id>  retire a run's receipts and dispatch records — the
+                             ONLY way to run a task again. Smokin never retries on
+                             its own, and deleting a task's files by hand is not
+                             supported: a leftover .smokin/emit.lock then swallows
+                             the next receipt. It is also why attempt and seq are 1.
 
 THE WHOLE IDEA: there is no long-running orchestrator. Every fact the tick needs
 lives in the plan directory, so compaction, Ctrl-C, an SSH drop and

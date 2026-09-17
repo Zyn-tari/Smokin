@@ -630,7 +630,10 @@ runtime funnels through it. Order of operations is normative:
 3. **Write the receipt atomically.** `tasks/<ID>/.RECEIPT.<pid>.tmp` → `fsync(file)` →
    `fsync(dir)` → `rename()` onto `RECEIPT.json`. **Never an in-place write.**
 4. **Publish the pointer.** `spool/tmp/<seq>.json` → `rename()` → `spool/inbox/<seq>.json`.
-5. **Exit within a hard 2s budget.** No retries, no network loops.
+5. **No retries, no network loops — and no enforced time limit.** This step used to promise a
+   two-second exit deadline; the constant for it was declared and never read (found
+   2026-09-16). It is not enforced on purpose: a slow disk would then cost a finished task its
+   receipt. An emitter that hangs is reaped at the task's budget, like a worker that hangs.
 
 ### 3e · The completion gate — turning "a turn ended" into "the task ended"
 
@@ -799,8 +802,16 @@ depend on one.
 
 ### 3i · The reaper — a missing receipt is a result
 
-`smokin reap` (a pass **inside** the tick, not a daemon) compares each `dispatch/<ID>.json`
-against the wall clock. Past `budget_s` with no receipt, it synthesises one:
+**There are no retries.** Once a task has a dispatch record, `Plan.state` never returns it to
+`ready` — not after a refuted verdict, not after a stale receipt. A task runs again only after
+`smokin reset`, which clears its receipt, verdict, dispatch record and `.smokin/emit.lock`
+together. Deleting those by hand is unsupported: a leftover `emit.lock` makes the next
+emitter leave without writing a receipt. It is also why every receipt says `attempt: 1` and
+every `seq` ends in `:1` — there is no second attempt to count.
+
+`smokin reap` (a pass **inside** the tick, not a daemon) measures each `dispatch/<ID>.json`
+from its monotonic start (`bin/smokin_clock.py`; the wall clock until 2026-09-16, when a
+stepped clock was found to move reaps). Past `budget_s` with no receipt, it synthesises one:
 `terminal: "reaped"`, `exit: null`, the last 20 lines of `transcript.log` as `result`, and — for a
 pane — a dump of `herdr agent explain <role> --json` into `tasks/<ID>/.smokin/explain.json`
 (SUSPECTED; the command exists per ground truth, the dump has **not** been exercised here).

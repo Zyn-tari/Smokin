@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — the docs say what the emitter and retries really do · 2026-09-17
+
+Decided by the owner after the older issues were confirmed against the code. No behaviour changes.
+
+- **The emitter has no time limit, and now says so.** Its header and DESIGN.md §3d promised a hard
+  two-second budget; the constant for it (`BUDGET_S`) was declared and never read. It is removed,
+  not enforced: enforcing it would let a slow disk cost a finished task its receipt, and a hung
+  emitter is already reaped at the task's budget, like a hung worker.
+- **Retries go through `smokin reset`, and only through it.** `Plan.state` never returns a
+  dispatched task to ready, so Smokin never retries on its own. DESIGN.md §3i and `smokin --help`
+  now say so, and say why hand-deleting a task's files is unsupported (a leftover
+  `.smokin/emit.lock` makes the next emitter leave without a receipt) and why `attempt` and `seq`
+  are always 1.
+- DESIGN.md §3i no longer says the reaper measures against the wall clock; it has used the
+  monotonic stamp since the clock change.
+
+Suite 43 passed, 0 failed.
+
 ## Unreleased — the content gate cannot hang, crash, or be fooled · 2026-09-17
 
 The adversarial review of the content-based completion gate (T16 in the suite-timing plan) upheld
