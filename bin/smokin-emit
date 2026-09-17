@@ -65,8 +65,11 @@ def sha(p: Path):
     cached so FINDINGS.md is read once per emit, not twice."""
     key = str(p)
     if key not in _SHA_CACHE:
-        v = D.file_sha(p)
-        _SHA_CACHE[key] = v if (v and D.HASH_RE.match(v)) else None
+        # EMPTY IS HASHED HERE, as receipts always recorded it: an artifact
+        # that is empty at emit time is still watched. 12b63ef recorded it as
+        # null, so a receipt stopped noticing when the file was filled (T20).
+        v = D.file_sha(p, empty_is_none=False)
+        _SHA_CACHE[key] = v if D.is_hash(v) else None
     return _SHA_CACHE[key]
 
 
@@ -151,7 +154,8 @@ def main() -> int:
     has_file = findings.is_file() and findings.stat().st_size > 0
     before = disp.get("findings_before")
     if "findings_before" in disp and D.usable(before):
-        produced = sha(findings) is not None and sha(findings) != before
+        now = sha(findings)                 # the one read of FINDINGS.md
+        produced = now is not None and now != D.EMPTY_SHA and now != before
         produced_by = "content"
     else:
         produced = has_file and \

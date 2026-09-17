@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — the hashing closes the second review's findings · 2026-09-17
+
+The adversarial review of `12b63ef` and `60e3cee` (T20 in the suite-timing plan) upheld 30 of 39
+claims. Its five refutations of the hashing work, all correct, are fixed here, with one decision.
+
+- **A size cap of 4 GiB (decided by the owner).** Hashing never blocked, but its time grew with
+  size: an 8 GiB sparse artifact made every `smokin status` take ~22s. `file_sha` now refuses a file
+  over 4 GiB from `fstat`, before reading, and stops if a file grows past it while being read.
+- **`file_sha` never raises.** A path containing NUL, or an unencodable surrogate, raised past the
+  `OSError` handler; it is now `"unhashable: not an openable path"`. That also closes the crash it
+  caused: an artifact name with NUL in RECEIPT.json killed `smokin status` and `tick`, and stalled a
+  healthy task beside it.
+- **A hash is the whole string.** `HASH_RE` ended in `$`, which also matches before a trailing
+  newline, so `"sha256:<hex>\n"` as `findings_before` read an untouched file as done. `is_hash()`
+  uses `fullmatch`.
+- **Empty artifacts are watched again.** `12b63ef` recorded an empty artifact as null, so filling it
+  later no longer made the receipt stale — and `60e3cee` then read receipts from older emitters,
+  which recorded `sha256(empty)`, as stale "missing" on an unchanged empty file. Artifacts are
+  recorded and re-checked as `sha256(empty)` again; only `findings_before` treats an empty
+  FINDINGS.md as null. FINDINGS.md is still read once per emit.
+- **A recorded value that is not a real hash makes a receipt stale.** Compared as a string,
+  `"unhashable: not a regular file"` equalled what a FIFO hashes to now, and read as fresh.
+
+`test-continuity.py` gains "what T20 found in the hashing", 17 checks. Continuity 183 → 200. Each
+fix was undone in a copy and its checks failed: the old regex 2, no exception guard 7, no cap 2,
+empty-as-null 1, the recorded-value check 2. Suite 43 passed, 0 failed.
+
 ## Unreleased — the receipt check reads no artifact whole · 2026-09-17
 
 `Plan.receipt` re-hashes every artifact a receipt lists, on every `status` and `tick`, and it read

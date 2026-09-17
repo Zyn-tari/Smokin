@@ -671,8 +671,11 @@ writes byte-identical findings produced nothing new, and is recorded as `partial
 > "different", so an untouched file read as done.
 
 The hash is now taken by `bin/smokin_digest.py`: it opens without blocking, checks that what it
-opened is a regular file, and reads in chunks. What cannot be hashed is recorded as
-`"unhashable: <why>"`. The content rule is used only when `findings_before` is null or a real
+opened is a regular file, refuses anything over 4 GiB (decided 2026-09-17 — hashing time grows with
+size), and reads in chunks. It never raises: a path that cannot even be opened is named too. What
+cannot be hashed is recorded as `"unhashable: <why>"`. A hash is only a hash if the whole string is
+`sha256:` and 64 hex digits. Artifacts keep their old form — an empty artifact hashes to
+`sha256(empty)` — and a receipt whose recorded value is not a real hash is stale. The content rule is used only when `findings_before` is null or a real
 `sha256:` hash; anything else falls back to the mtime rule, and `produced_by` says why.
 
 ### 3f · The receipt format

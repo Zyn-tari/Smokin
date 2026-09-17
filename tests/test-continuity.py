@@ -787,6 +787,85 @@ chk("a 1 GiB artifact does not crash `smokin status` under a 600 MiB limit",
 has("...and status still prints its summary line", r.stdout, "verified")
 f.unlink()
 
+print("\n=== what T20 found in the hashing ===")
+# Each case below was a refutation of the first hashing fix (T20, 2026-09-17).
+import smokin_digest as DG
+chk("a hash with a trailing newline is not a hash", DG.is_hash(h(old) + chr(10)), False)
+r = emit_with("stale-malformed-newline", preexisting=old, before=h(old) + chr(10))
+chk("...so an untouched file with that findings_before is not done", r.get("claim"), "partial")
+for bad in ("x" + chr(0) + "y", "x" + chr(0xD800) + "y"):
+    try:
+        v = DG.file_sha(bad)
+        raised = False
+    except Exception:
+        v, raised = None, True
+    chk(f"file_sha({bad!r}) does not raise", raised, False)
+    has("...and names the path unhashable", str(v), "unhashable")
+big = LAB / "five-gib.bin"
+with open(big, "wb") as fh:
+    fh.truncate(5 << 30)                       # sparse: costs no disk
+t0 = time.monotonic()
+v = DG.file_sha(big)
+chk("a 5 GiB file is refused as larger than 4 GiB", v, "unhashable: larger than 4 GiB")
+chk("...at once, without reading it", time.monotonic() - t0 < 2, True)
+big.unlink()
+
+# Empty artifacts are recorded and re-checked as EMPTY_SHA, as they always were.
+p, f = receipt_plan("rcpt-empty")
+(p / "tasks" / "T1" / "CHANGES.md").write_text("")
+rec = json.loads((p / "tasks" / "T1" / "RECEIPT.json").read_text())
+rec["artifacts"]["CHANGES.md"] = DG.EMPTY_SHA            # what every emitter wrote before 12b63ef
+(p / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(rec))
+chk("an older receipt listing an unchanged empty artifact stays fresh",
+    bool(S.Plan(p).receipt("T1").get("stale")), False)
+(p / "tasks" / "T1" / "CHANGES.md").write_text("filled in later\n")
+chk("...and filling that artifact afterwards makes it stale",
+    bool(S.Plan(p).receipt("T1").get("stale")), True)
+p = mkplan("emit-empty-artifact", [dict(tid="T1", owner="worker-T1")])
+(p / "tasks" / "T1" / "CHANGES.md").write_text("")
+(p / "tasks" / "T1" / "FINDINGS.md").write_text("# T1\n\nwork\n")
+(p / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps({
+    "task": "T1", "seq": "rTEST:T1:1", "run": "rTEST", "attempt": 1, "runtime": "demo",
+    "dispatch": "inproc", "placement": "inproc", "started": "2026-01-01T00:00:00Z",
+    "started_ns": 1, "started_epoch": time.time(), "budget_s": 60, "findings_before": None,
+    **CL.stamp()}))
+subprocess.run([str(ROOT / "bin" / "smokin-emit"), "T1", "empty-test"],
+               input='{"terminal":"ok","exit":0}', text=True, capture_output=True,
+               env=dict(os.environ, SMOKIN_PLAN=str(p)))
+r = json.loads((p / "tasks" / "T1" / "RECEIPT.json").read_text())
+chk("the emitter records an empty artifact as the empty hash, not null",
+    r["artifacts"].get("CHANGES.md"), DG.EMPTY_SHA)
+chk("...while an empty FINDINGS.md still is not produced work",
+    emit_with("stale-empty-again", findings="", before=None).get("claim"), "partial")
+
+# A recorded value that is not a hash cannot vouch for anything.
+p, f = receipt_plan("rcpt-unhashable-recorded")
+f.unlink()
+os.mkfifo(f)
+rec = json.loads((p / "tasks" / "T1" / "RECEIPT.json").read_text())
+rec["artifacts"]["FINDINGS.md"] = "unhashable: not a regular file"
+(p / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(rec))
+r = S.Plan(p).receipt("T1")
+chk("a recorded 'unhashable' value does not read as fresh", bool(r.get("stale")), True)
+has("...and says the recorded value is not a hash", str(r.get("why")), "not a hash")
+
+# An artifact name that cannot be opened must not crash status or tick.
+p = mkplan("rcpt-nul-name", [dict(tid="T1", owner="worker-T1"),
+                             dict(tid="T2", owner="worker-T2")])
+(p / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps({
+    "schema": "smokin.receipt/1", "seq": "rTEST:T1:1", "run": "rTEST", "task": "T1",
+    "attempt": 1, "terminal": "ok", "claim": "done", "source": "test",
+    "artifacts": {"bad" + chr(0) + "name": "sha256:" + "0" * 64}}))
+for verb in ("status", "tick"):
+    r = subprocess.run([str(SMOKIN), verb, str(p)], capture_output=True, text=True, timeout=60)
+    chk(f"an artifact name with NUL does not crash `smokin {verb}`", "Traceback" in r.stderr, False)
+chk("...and the healthy T2 is still dispatched",
+    (p / ".smokin" / "dispatch" / "T2.json").is_file(), True)
+for _ in range(40):
+    if (p / "tasks" / "T2" / "RECEIPT.json").is_file():
+        break
+    time.sleep(0.1)
+
 # Whatever sits at FINDINGS.md must not stall a tick. A FIFO hung it, and a
 # file bigger than memory (or a link to /dev/zero) killed it — and a stuck tick
 # dispatches nothing, the healthy task beside it included.

@@ -492,7 +492,17 @@ class Plan:
         for name, recorded in (r.get("artifacts") or {}).items():
             if recorded is None:
                 continue
-            current = D.file_sha(self.root / "tasks" / tid / name)
+            # A recorded value that is not a real hash cannot vouch for
+            # anything: stale. (Compared as a string it could EQUAL what a FIFO
+            # hashes to now — "unhashable: …" — and read as fresh; T20.)
+            if not D.is_hash(recorded):
+                return {"stale": True, "why": f"{name} recorded value is not a hash", **r}
+            # Empty hashes to EMPTY_SHA, as the emitter records it — so a
+            # receipt written by any emitter version stays fresh on an
+            # unchanged empty file. A name that cannot even be opened (NUL)
+            # comes back "unhashable", never an exception: this runs on every
+            # status and tick, and a crash here stalls every other task.
+            current = D.file_sha(self.root / "tasks" / tid / str(name), empty_is_none=False)
             if current != recorded:
                 why = ("missing" if current is None else
                        current if current.startswith("unhashable") else "hash mismatch")
