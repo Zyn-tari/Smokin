@@ -364,6 +364,19 @@ else
   cat "$LAB/waitrace.out"
 fi
 
+# `--run <id>` MEANT NOTHING. reset() ignored its own parameter and wiped every
+# task in the plan for any id, including one that had never existed — a
+# completed plan lost its verified work to a typo, with a success message. The
+# control is the one that matters: a scoped reset must still fully reset the
+# run it names, or "leaves the others alone" is satisfied by doing nothing.
+if python3 "$ROOT/tests/test-reset-scope.py" > "$LAB/resetscope.out" 2>&1; then
+  n=$(count_pass "$LAB/resetscope.out")
+  ok "reset scope: $n checks on --run meaning that run"
+else
+  bad "reset scope" "see below"
+  cat "$LAB/resetscope.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

@@ -230,7 +230,7 @@ verdict  T3  REFUTED
 | `smokin memory <plan>` | print what each persona observed, and any skill candidate. Read-only |
 | `smokin remember <plan> --agent … --task … --claim … --observation … --command …` | write one entry down. **Refused without the command that produced it**, and refused for a `--task` that names no task in this plan. It is a shape check, not a judgement about the prose — see DESIGN §2h |
 | `smokin resume <plan>` | clear a halt, after a human has read it |
-| `smokin reset <plan>` | retire the run — receipts, verdicts, artefacts, statuses, rulings. Memory entries are kept; the recalls rendered from them are not |
+| `smokin reset --run <id> <plan>` | retire **that run** — its receipts, verdicts, artefacts, statuses and rulings, and nothing another run owns. An id this plan has no trace of changes nothing and exits 2. `--all` retires every run; bare `reset` refuses. Memory entries are kept; the recalls rendered from them are not |
 
 **Exit codes:** `0` complete · `1` work in flight, tick again · `2` not a plan directory ·
 `3` stuck — nothing running and nothing ready · `4` **halted — a human has to read something**.

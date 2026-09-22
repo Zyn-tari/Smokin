@@ -17,11 +17,17 @@ smokin — an idempotent tick that dispatches a Grillin plan from disk.
     smokin invariants        resolve and print the plan-level invariants
              --recapture     take a new baseline, deliberately and on the record
     smokin resume            clear a halt, after a human has read it
-    smokin reset --run <id>  retire a run's receipts and dispatch records — the
+    smokin reset --run <id>  retire THAT RUN's receipts and dispatch records, and
+                             put only that run's tasks back to NOT STARTED — the
                              ONLY way to run a task again. Smokin never retries on
                              its own, and deleting a task's files by hand is not
                              supported: a leftover .smokin/emit.lock then swallows
                              the next receipt. It is also why attempt and seq are 1.
+                             An id this plan has no trace of changes NOTHING and
+                             exits 2, and prints the ids that do exist.
+    smokin reset --all       every run, every task back to NOT STARTED. The
+                             destructive one, so it has to be asked for by name.
+                             `reset` with neither flag refuses.
 
 THE WHOLE IDEA: there is no long-running orchestrator. Every fact the tick needs
 lives in the plan directory, so compaction, Ctrl-C, an SSH drop and
@@ -3143,14 +3149,104 @@ def doctor_fix(plan: Plan, report: dict):
     return 0
 
 
-def reset(plan: Plan, run):
-    n = 0
-    for p in list((plan.priv / "dispatch").glob("*.json")) if (plan.priv / "dispatch").is_dir() else []:
-        p.unlink(); n += 1
-    for d in ("spool/inbox", "spool/done", "spool/tmp"):
-        for p in list((plan.priv / d).glob("*")) if (plan.priv / d).is_dir() else []:
-            p.unlink(); n += 1
+def _runs_present(plan: Plan):
+    """Every run id this plan holds a trace of, and which tasks belong to each.
+
+    A task belongs to a run if its dispatch record or its receipt says so —
+    both carry `run`, and the spool pointer carries it inside `seq`
+    ("<run>:<task>:<attempt>"). Nothing here raises: a dispatch record or
+    receipt that will not parse is simply not evidence of a run.
+    """
+    runs = {}
+    d = plan.priv / "dispatch"
+    for f in (sorted(d.glob("*.json")) if d.is_dir() else []):
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("run") and rec.get("task"):
+            runs.setdefault(str(rec["run"]), set()).add(str(rec["task"]))
     for tid in plan.tasks:
+        try:
+            r = json.loads((plan.root / "tasks" / tid / "RECEIPT.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(r, dict) and r.get("run"):
+            runs.setdefault(str(r["run"]), set()).add(tid)
+    return runs
+
+
+def _seq_run(seq):
+    """The run id out of a `<run>:<task>:<attempt>` seq, or None."""
+    parts = str(seq).split(":")
+    return parts[0] if len(parts) >= 3 and parts[0] else None
+
+
+def reset(plan: Plan, run, all_runs: bool = False):
+    """Retire a run's work so its tasks can be run again.
+
+    `--run <id>` MEANS `--run <id>`. It did not: the id was accepted, promised
+    in `--help` and in DESIGN.md's risk row 14, and then ignored — every task in
+    the plan was wiped whatever was passed, including for a run id that had
+    never existed. A completed plan lost its verified work to a typo, with a
+    success message (QA sweep 2026-09-22, D16).
+
+    So: an id that this plan has no trace of changes NOTHING and exits 2. A
+    whole-plan reset is real and still available, and now has to be asked for by
+    name with `--all`, because it is the destructive one. Bare `reset` refuses.
+
+    What is KEPT is unchanged and deliberate — see the comments below on
+    rulings and on `memory.jsonl`. This scopes what is DELETED, nothing else.
+    """
+    runs = _runs_present(plan)
+    known = ", ".join(sorted(runs)) or "(none — nothing has been dispatched here)"
+    if all_runs:
+        scope, wanted = set(plan.tasks), None
+    else:
+        if not run:
+            print("smokin: reset needs --run <id>, or --all to reset the whole plan. "
+                  "Nothing was changed.", file=sys.stderr)
+            print(f"  runs in this plan: {known}", file=sys.stderr)
+            return 2
+        wanted = str(run)
+        if wanted not in runs:
+            print(f"smokin: no run {wanted!r} in this plan — nothing was changed.",
+                  file=sys.stderr)
+            print(f"  runs in this plan: {known}", file=sys.stderr)
+            return 2
+        scope = set(runs[wanted])
+
+    current = None
+    try:
+        current = json.loads((plan.priv / "run.json").read_text()).get("run")
+    except (OSError, ValueError, AttributeError):
+        pass
+    covers_current = all_runs or (current is not None and str(current) == wanted)
+
+    n = 0
+    d = plan.priv / "dispatch"
+    for f in (sorted(d.glob("*.json")) if d.is_dir() else []):
+        if not all_runs:
+            try:
+                rec = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue                     # not this run's, as far as anyone can tell
+            if not isinstance(rec, dict) or str(rec.get("run")) != wanted:
+                continue
+        f.unlink(); n += 1
+    for sub in ("spool/inbox", "spool/done", "spool/tmp"):
+        for f in (sorted((plan.priv / sub).glob("*")) if (plan.priv / sub).is_dir() else []):
+            if not all_runs:
+                try:
+                    ptr = json.loads(f.read_text())
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(ptr, dict) or _seq_run(ptr.get("seq")) != wanted:
+                    continue
+            f.unlink(); n += 1
+    for tid in sorted(scope):
+        if tid not in plan.tasks:
+            continue
         # The output contract goes too. A task back at NOT STARTED whose
         # FINDINGS.md is still on disk is incoherent state, and Grillin's gate
         # says so precisely: the done-command passes before any work is done,
@@ -3176,6 +3272,11 @@ def reset(plan: Plan, run):
     # judgement, which is exactly the trail this design exists to leave.
     retired = 0
     for (cls, tid), rec in sorted(R.standing(plan.priv).items()):
+        # A SCOPED RESET RETIRES ONLY WHAT IT RESET. A ruling about a task this
+        # reset did not touch still stands, and a plan-level ruling is not any
+        # one run's to retire.
+        if not all_runs and tid not in scope:
+            continue
         R.append_ruling(plan.priv, {"class": cls, "task": tid, "retired": True,
                                     "retires": rec.get("seq"), "outcome": rec.get("outcome"),
                                     "because": f"retired by `smokin reset` (was: {rec.get('because')})"})
@@ -3191,12 +3292,18 @@ def reset(plan: Plan, run):
     # measurement of one run's starting world, and after a reset that world is not
     # the world the next run starts in. Keeping it would silently measure the new
     # run against the old run's before. The capture is in the ledger either way.
-    if I.baseline_path(plan.priv).exists():
-        I.baseline_path(plan.priv).unlink(); n += 1
-    (plan.priv / "HALT.json").unlink(missing_ok=True)
-    (plan.priv / "run.json").unlink(missing_ok=True)
+    # THE BASELINE, THE HALT AND THE RUN CURSOR BELONG TO THE CURRENT RUN, so
+    # they go only when this reset covers it. Resetting an older run must not
+    # clear the halt the live one is sitting behind.
+    if covers_current:
+        if I.baseline_path(plan.priv).exists():
+            I.baseline_path(plan.priv).unlink(); n += 1
+        (plan.priv / "HALT.json").unlink(missing_ok=True)
+        (plan.priv / "run.json").unlink(missing_ok=True)
+    where = ("all tasks" if all_runs
+             else f"{len(scope)} task(s) of run {wanted}: {', '.join(sorted(scope)) or '—'}")
     print(f"reset: removed {n} artefact(s), retired {retired} ruling(s); "
-          f"all tasks back to NOT STARTED")
+          f"{where} back to NOT STARTED")
     return 0
 
 
@@ -3425,7 +3532,12 @@ def main():
                     help="closes the TAB of each task the reaper had to give up on "
                          "(SIGHUP). Not tasks that finished — their tab is what pane "
                          "reuse returns to")
-    ap.add_argument("--run", default=None)
+    ap.add_argument("--run", default=None,
+                    help="reset: the run id whose work is retired. An id this plan has "
+                         "no trace of changes nothing and exits 2")
+    ap.add_argument("--all", action="store_true",
+                    help="reset: retire EVERY run in the plan — every task back to NOT "
+                         "STARTED. The destructive one, so it has to be asked for by name")
     ap.add_argument("--task", default=None, help="verify: gate one task instead of all")
     ap.add_argument("--fix", action="store_true",
                     help="doctor: add the shipped subagent caps to this plan's own "
@@ -3497,7 +3609,7 @@ def main():
             return 2
         return doctor(plan, fix=a.fix)
     if a.cmd == "reset":
-        return reset(plan, a.run)
+        return reset(plan, a.run, all_runs=a.all)
     if a.cmd == "rulings":
         return show_rulings(plan)
     if a.cmd == "memory":

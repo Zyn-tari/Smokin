@@ -479,7 +479,7 @@ run(k)
 old_run = g(json_of(k, ".smokin/run.json"), "run")
 chk("before reset: an entry and a recalled file",
     [len(entries(k)), (k / "tasks" / "T3" / "MEMORY.md").is_file()], [1, True])
-run(k, "reset")
+run(k, "reset", "--all")      # whole-plan reset is --all since D16
 chk("reset keeps the entry", len(entries(k)), 1)
 chk("...and removes the rendered recall", (k / "tasks" / "T3" / "MEMORY.md").is_file(), False)
 run(k)

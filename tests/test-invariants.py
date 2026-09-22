@@ -393,7 +393,7 @@ print("\n=== reset drops the baseline; the capture stays in the ledger ===")
 p = plan("resetp")
 tick(p)
 chk("there is a baseline", bool(baseline(p)), True)
-smokin(p, "reset")
+smokin(p, "reset", "--all")   # whole-plan reset is --all since D16
 chk("reset removes it — a new run needs a new before", baseline(p), None)
 chk("...but the capture is still readable in the ledger",
     any(e.get("event") == "baseline" for e in led(p)), True)

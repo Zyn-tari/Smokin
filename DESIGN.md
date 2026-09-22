@@ -1378,7 +1378,7 @@ Stated as failures, not as risks, because a risk register is a way of not saying
 | 11 | **A receipt can outlive its truth.** `RECEIPT.json` survives a `git checkout` that reverts the work | medium | Hash mismatch → `stale` → treated as absent (§3g) |
 | 12 | **The pane ceiling will be raised.** It is one number in one file, the failure is social, it arrives at week three, and it looks like success until the review queue *is* the project | high, unfixable by tooling | Marked provisional; phase 8 obliges measuring it |
 | 13 | **Concurrent plans share one machine and one global config per vendor.** `~/.codewhale/config.toml` (credentials), `~/.codex/config.toml`, a fixed port 7891 | medium | `flock` on the credential file; declared in the runtimes row; two plans on one box is a stated limitation |
-| 14 | **Re-running a plan inherits the last run's receipts.** A stale cursor skips receipts that look consumed | medium | Every receipt, pointer and dispatch record carries `run`. `smokin reset --run <id>` is the ceremony; a receipt from a previous run is refused, not believed |
+| 14 | **Re-running a plan inherits the last run's receipts.** A stale cursor skips receipts that look consumed | medium | Every receipt, pointer and dispatch record carries `run`. `smokin reset --run <id>` is the ceremony, and it is scoped to that run — for two years it was not, and wiped the whole plan for any id, including one that had never existed (QA sweep 2026-09-22, D16); a receipt from a previous run is refused, not believed |
 
 ---
 

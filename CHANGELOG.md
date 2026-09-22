@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — `reset --run <id>` means that run · 2026-09-22
+
+A QA sweep found the one defect in either tool that destroys work (D16).
+
+**`--run` was accepted, documented, and never read.** `reset(plan, run)` did not reference its own
+parameter. It globbed every dispatch record, drained the whole spool, and unlinked `RECEIPT.json`,
+`VERDICT.json`, `.smokin/emit.lock`, `MEMORY.md`, `FINDINGS.md`, `CHANGES.md` and `QUESTIONS.md`
+for **every** task, then set every status to NOT STARTED — whatever id was passed. A completed
+plan lost its verified work to `--run totally-fake-run-id-999`, an id that had never existed, and
+was told `reset: removed N artefact(s) … all tasks back to NOT STARTED`. Meanwhile `--help`
+promised "a run's receipts" and DESIGN.md's risk row 14 called it "the ceremony" for a run id.
+
+**Now:** a task belongs to a run if its dispatch record or its receipt says so, and only those
+tasks are touched. Dispatch records and spool pointers are filtered the same way — the pointer
+carries the run inside its `seq`, `<run>:<task>:<attempt>`.
+
+**An id this plan has no trace of changes nothing and exits 2**, printing the ids that do exist.
+That is the case that cost the work, and it is now the cheapest possible failure.
+
+**A whole-plan reset has to be asked for by name.** `--all` does what `reset` used to do; bare
+`reset` refuses and says how to ask. This is a breaking change on purpose: the destructive reading
+should not be the default one, and three harnesses that meant "reset everything" now say `--all`.
+
+**What is KEPT is unchanged.** Rulings are still retired rather than deleted and `memory.jsonl`
+still survives — both for the reasons in the comments there. A *scoped* reset retires only the
+rulings of the tasks it reset, so `reset --run <other>` cannot be used to erase an inconvenient
+judgement. The baseline, the halt and the run cursor belong to the current run and go only when
+the reset covers it: resetting an older run must not clear the halt the live one is sitting behind.
+
+`tests/test-reset-scope.py`, new: 24 checks, registered in `run-tests.sh`. Seven mutations, each
+caught — including one that survived the first pass, because the rulings-scope branch had no probe
+until a check was written for it. Full suite 44 passed, 0 failed.
+
 ## Unreleased — the receipt check's own `is_file()` could raise · 2026-09-22
 
 The adversarial review of `f17b759` (T26 in the suite-timing plan) upheld the receipt work except

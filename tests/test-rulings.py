@@ -318,7 +318,8 @@ chk("the node wrote no new file into the task dir", wrote - {
 print("\n=== reset retires rulings, it does not erase them ===")
 p = plan("resetp", answer={"outcome": "reject", "because": "not done"})
 tick(p)
-subprocess.run([sys.executable, str(SMOKIN), "reset", str(p)], capture_output=True)
+subprocess.run([sys.executable, str(SMOKIN), "reset", "--all", str(p)],
+               capture_output=True)   # whole-plan reset is --all since D16
 led = ledger(p)
 chk("the ruling is still readable after a reset", led[0]["outcome"], "reject")
 chk("...and a retirement was appended", led[-1].get("retired"), True)
