@@ -479,14 +479,22 @@ class Plan:
 
     def receipt(self, tid):
         p = self.task_dir(tid) / "RECEIPT.json"
-        if not p.is_file():
-            return None
-        # NOTHING HERE MAY RAISE. `status` and `tick` read every task's receipt
-        # on every pass, so one unreadable file must not stall the other
-        # twenty-five tasks. A receipt that cannot be read, is not a JSON
-        # object, or is too large to be one reads as stale — which is what an
-        # unreadable claim means anyway. (T23, 2026-09-17.)
+        # NOTHING HERE MAY RAISE, AND THAT INCLUDES THE `is_file()`. `status`
+        # and `tick` read every task's receipt on every pass, so one unreadable
+        # file must not stall the other twenty-five tasks. A receipt that
+        # cannot be read, is not a JSON object, or is too large to be one reads
+        # as stale — which is what an unreadable claim means anyway. (T23,
+        # 2026-09-17.)
+        #
+        # `is_file()` USED TO SIT OUTSIDE THIS TRY, and on python 3.12 it does
+        # not swallow EACCES: a task directory that becomes unsearchable while
+        # the loop is running raised PermissionError straight out of `status`.
+        # `smokin run` rebuilds Plan(root) every pass, so a mid-run permission
+        # change reaches it. This is the same `Path.is_file()` trap Grillin was
+        # refuted for. (T26, 2026-09-22.)
         try:
+            if not p.is_file():
+                return None
             if p.stat().st_size > RECEIPT_MAX_BYTES:
                 return {"stale": True, "why": "larger than a receipt can be"}
             r = json.loads(p.read_text())
@@ -525,7 +533,13 @@ class Plan:
                 # unchanged identity does NOT mean an unchanged file. Measured
                 # against what it would buy — 0.03 ms a tick, because artifacts
                 # are small text files — that is a bad trade (D14, 2026-09-22).
-                # A 4 GiB file is not rewritten inside 4 ms.
+                #
+                # THE SAME BLIND SPOT APPLIES HERE, and it is accepted rather
+                # than unnoticed: a write into a >4 GiB artifact inside the
+                # same ~4 ms granule as the recorded stamp reads fresh, 20
+                # times out of 20 (T26). It is bounded — that granule, that
+                # file size — and the alternative is watching such a file with
+                # nothing at all, which is what happened before.
                 #
                 # EQUALITY ONLY — see smokin_digest's file_id for why nothing
                 # here may be ordered.

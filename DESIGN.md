@@ -802,6 +802,11 @@ back-to-back same-size rewrites shared one `mtime_ns`. Device, inode and size ar
 the receipt would have read **fresh on a rewritten file**, which is the one thing this check
 exists to catch.
 
+**The blind spot is accepted, not overlooked.** A write into such an artifact inside the same
+~4 ms granule as the stamp the emitter recorded reads fresh — 20 times out of 20 when measured
+directly. It is bounded by that granule and by the 4 GiB size, and the alternative it replaced was
+watching the file with nothing at all.
+
 **Identities are compared for equality and nothing else** — never ordered, never subtracted. This
 machine's wall clock steps ~2.2 s backwards every few minutes, so "newer" is not a question a
 file's timestamps can answer here. A recorded stamp in the future and one in the past are both

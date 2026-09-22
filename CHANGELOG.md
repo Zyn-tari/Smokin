@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — the receipt check's own `is_file()` could raise · 2026-09-22
+
+The adversarial review of `f17b759` (T26 in the suite-timing plan) upheld the receipt work except
+for one gap in the rule it stated, and one characterisation.
+
+**`Plan.receipt` does raise.** The `is_file()` test sat *before* the `try`, and on python 3.12
+`Path.is_file()` does not swallow EACCES. A task directory that becomes unsearchable while the loop
+is running raised `PermissionError` straight out of `status` — and `smokin run` rebuilds
+`Plan(root)` on every pass, so a mid-run permission change reaches it. This is the same
+`Path.is_file()` trap Grillin was refuted for two rounds ago. It is inside the `try` now, and reads
+as stale.
+
+**The >4 GiB write window is bounded, not rare.** The note said it was "not a real hazard". With the
+harness's 50 ms settle removed, a one-byte in-place write into a 5 GiB artifact read **fresh 20
+times out of 20**. It is bounded — it needs a write inside the same ~4 ms granule as the emitter's
+stat, on a file over 4 GiB — and the alternative it replaced was watching such a file with nothing
+at all. DESIGN.md, the code comment and the harness comment now say that.
+
+`test-continuity.py`: 242 checks (was 241).
+
 ## Unreleased — the receipt check reads safely, and watches what it could not hash · 2026-09-22
 
 The adversarial review of `939ab09` (T23 in the suite-timing plan) found that an artifact too large

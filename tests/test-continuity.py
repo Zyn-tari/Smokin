@@ -1049,8 +1049,9 @@ chk("an artifact too large to hash is watched by identity", got.get("stale"), No
 chk("...without being read", did, [])
 # The sleep is the ~4 ms granule again, and it is the honest thing to write:
 # identity cannot see a write that lands in the same granule as the one it
-# recorded. For a file this size that window is not a real hazard — the
-# decision note says why — but a test must not pretend it is not there.
+# recorded. Without the sleep this reads FRESH 20 times out of 20 (T26), so the
+# window is deterministic inside itself, not rare — it is only BOUNDED, by that
+# granule and by the >4 GiB size. A test must not pretend it is not there.
 time.sleep(0.05)
 with open(big, "r+b") as fh:
     fh.write(b"x")
@@ -1134,6 +1135,23 @@ for label, write in (
 ):
     got, crash = receipt_says(label.replace(" ", "-")[:40], write)
     chk(f"{label} reads as stale", (crash, (got or {}).get("stale")), (None, True))
+
+# `is_file()` SAT OUTSIDE THE TRY, and on python 3.12 it does not swallow
+# EACCES. A task directory that becomes unsearchable while the loop is running
+# raised PermissionError straight out of `status`; `smokin run` rebuilds
+# Plan(root) every pass, so a mid-run permission change reaches it. (T26.)
+q = mkplan("rcpt-dir-locked", [dict(tid="T1", owner="worker-T1")])
+(q / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps({"task": "T1", "artifacts": {}}))
+pl = S.Plan(q)                                   # built while it is still readable
+(q / "tasks" / "T1").chmod(0)
+try:
+    got, crash = pl.receipt("T1"), None
+except Exception as e:                           # noqa: BLE001 — that is the check
+    got, crash = None, f"{e.__class__.__name__}: {e}"
+finally:
+    (q / "tasks" / "T1").chmod(0o755)
+chk("a task directory locked after the plan was read is stale, not a crash",
+    (crash, (got or {}).get("stale")), (None, True))
 
 print("\n=== D14 · a file that states size 0 is read, but not followed ===")
 # EVERY FILE UNDER /proc IS A REGULAR FILE OF STATED SIZE 0 that yields content
