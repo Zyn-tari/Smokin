@@ -259,6 +259,10 @@ PANE_CEILING = {"XS": 0, "S": 1, "M": 3, "L": 5, "XL": 5}
 # be what a subscription-billed budget wants — the correct behaviour for git and
 # the affordable one are the same behaviour.
 AGENTS_IN_FLIGHT_DEFAULT = 1
+# A RECEIPT IS A SMALL JSON OBJECT. Anything past this is not one, and reading
+# it whole on every tick is the hazard smokin_digest exists to avoid — so the
+# size is checked before the read, not after.
+RECEIPT_MAX_BYTES = 1 << 20
 
 # States in which nobody is working in the task's directory any more. Anything
 # else — ready, blocked, running, claimed — means a worker may still be inside
@@ -477,10 +481,26 @@ class Plan:
         p = self.task_dir(tid) / "RECEIPT.json"
         if not p.is_file():
             return None
+        # NOTHING HERE MAY RAISE. `status` and `tick` read every task's receipt
+        # on every pass, so one unreadable file must not stall the other
+        # twenty-five tasks. A receipt that cannot be read, is not a JSON
+        # object, or is too large to be one reads as stale — which is what an
+        # unreadable claim means anyway. (T23, 2026-09-17.)
         try:
+            if p.stat().st_size > RECEIPT_MAX_BYTES:
+                return {"stale": True, "why": "larger than a receipt can be"}
             r = json.loads(p.read_text())
-        except ValueError:
+        except (OSError, ValueError, RecursionError, UnicodeError):
             return {"stale": True, "why": "unparseable"}
+        if not isinstance(r, dict):
+            return {"stale": True, "why": "not a JSON object"}
+        arts = r.get("artifacts")
+        if arts is None:
+            arts = {}
+        elif not isinstance(arts, dict):
+            return {**r, "stale": True, "why": "artifacts is not an object"}
+        ids = r.get("artifact_ids")
+        ids = ids if isinstance(ids, dict) else {}
         # EVERY TICK READS THIS, so it must not read an artifact whole. The
         # first version did (`read_bytes()`), so a large artifact cost its full
         # size in memory on every pass, and one larger than memory killed
@@ -489,14 +509,37 @@ class Plan:
         # non-regular files. That was tested, 2026-09-17, and the first comment
         # here said otherwise.) smokin_digest hashes in chunks. Missing,
         # unhashable or different all mean the same as before: stale.
-        for name, recorded in (r.get("artifacts") or {}).items():
+        for name, recorded in arts.items():
             if recorded is None:
+                # NO HASH TO COMPARE. Either the artifact was absent when the
+                # receipt was written — nothing to watch — or it was too large
+                # to hash, and then its IDENTITY is the only record of it there
+                # is. That case used to be watched by nothing at all: an
+                # artifact over 4 GiB could be rewritten and the receipt stayed
+                # fresh (T23).
+                #
+                # THE IDENTITY IS NOT USED ANYWHERE ELSE, on purpose. Trusting
+                # it for a file that can be hashed would skip the hash, and
+                # this filesystem's mtime granularity is ~4 ms: 193 of 200
+                # back-to-back same-size rewrites shared one mtime_ns, so an
+                # unchanged identity does NOT mean an unchanged file. Measured
+                # against what it would buy — 0.03 ms a tick, because artifacts
+                # are small text files — that is a bad trade (D14, 2026-09-22).
+                # A 4 GiB file is not rewritten inside 4 ms.
+                #
+                # EQUALITY ONLY — see smokin_digest's file_id for why nothing
+                # here may be ordered.
+                rid = ids.get(name)
+                if isinstance(rid, dict) and not D.same_id(
+                        D.file_id(self.root / "tasks" / tid / str(name)), rid):
+                    return {**r, "stale": True,
+                            "why": f"{name} is not the file that was recorded"}
                 continue
             # A recorded value that is not a real hash cannot vouch for
             # anything: stale. (Compared as a string it could EQUAL what a FIFO
             # hashes to now — "unhashable: …" — and read as fresh; T20.)
             if not D.is_hash(recorded):
-                return {"stale": True, "why": f"{name} recorded value is not a hash", **r}
+                return {**r, "stale": True, "why": f"{name} recorded value is not a hash"}
             # Empty hashes to EMPTY_SHA, as the emitter records it — so a
             # receipt written by any emitter version stays fresh on an
             # unchanged empty file. A name that cannot even be opened (NUL)
@@ -506,7 +549,7 @@ class Plan:
             if current != recorded:
                 why = ("missing" if current is None else
                        current if current.startswith("unhashable") else "hash mismatch")
-                return {"stale": True, "why": f"{name} {why}", **r}
+                return {**r, "stale": True, "why": f"{name} {why}"}
         return r
 
     def verdict(self, tid):

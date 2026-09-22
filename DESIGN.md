@@ -693,6 +693,7 @@ cannot be hashed is recorded as `"unhashable: <why>"`. A hash is only a hash if 
  "exit":0,"started":"...Z","ended":"...Z","wall_s":412,"clock":"boottime|monotonic|wall-fallback: <why>",
  "result":"<final assistant text, UTF-8, truncated to 8192 bytes>",
  "artifacts":{"FINDINGS.md":"sha256:…","CHANGES.md":"sha256:…","QUESTIONS.md":null},
+ "artifact_ids":{"FINDINGS.md":{"dev":2096,"ino":67408,"size":412,"mtime_ns":…,"ctime_ns":…},…},
  "transcript":"tasks/T14/.smokin/transcript.log",
  "native":{"session_id":"…","transcript":"…"}}
 ```
@@ -779,6 +780,32 @@ receipt that will not parse, or whose `artifacts` hashes do not match the files 
 recorded in `ledger.jsonl` as `stale` and treated as **absent** — the task falls to the reaper.
 It is never silently believed. A committed `RECEIPT.json` survives a later `git checkout` that
 reverts the work it describes; the hashes exist so a cold reader can notice.
+
+**"Will not parse" is a wide door, and every part of it is stale, not a crash.** `Plan.receipt`
+runs for every task on every `status` and every `tick`, so one bad file must not stall the
+twenty-five good ones. A RECEIPT.json that cannot be read, is not a JSON object, is larger than a
+receipt can be (1 MiB, checked before the read), is invalid UTF-8, is nested past the recursion
+limit, or whose `artifacts` is not an object: all stale. And **nothing inside a receipt can decide
+its own verdict** — the staleness reading is applied over the receipt's keys, never under them.
+
+**`artifact_ids` — what the emitter saw, for the one artifact a hash cannot cover.** Beside each
+hash the emitter records the artifact's identity: device, inode, size, `mtime_ns`, `ctime_ns`.
+Additive, so the schema stays `smokin.receipt/1` and a reader that does not know the key compares
+hashes as before. It is consulted in exactly one case: an artifact that has **no** hash because it
+was too large to hash (§ the 4 GiB refusal). Those were previously watched by nothing at all.
+
+It is deliberately **not** used as a fast path for artifacts that can be hashed. That was the
+original plan, and building it produced the measurement that killed it: skipping the hash on an
+unchanged identity saves 0.03 ms per tick — artifacts are small text files, so the cost is the
+syscall, not the hashing — while this filesystem's mtime granularity is ~4 ms, and 193 of 200
+back-to-back same-size rewrites shared one `mtime_ns`. Device, inode and size are unchanged too, so
+the receipt would have read **fresh on a rewritten file**, which is the one thing this check
+exists to catch.
+
+**Identities are compared for equality and nothing else** — never ordered, never subtracted. This
+machine's wall clock steps ~2.2 s backwards every few minutes, so "newer" is not a question a
+file's timestamps can answer here. A recorded stamp in the future and one in the past are both
+simply *different*.
 
 ### 3h · The reader
 

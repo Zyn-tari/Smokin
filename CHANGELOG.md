@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased — the receipt check reads safely, and watches what it could not hash · 2026-09-22
+
+The adversarial review of `939ab09` (T23 in the suite-timing plan) found that an artifact too large
+to hash was watched by nothing, that a key inside RECEIPT.json could overwrite the staleness verdict
+reached about it, and that several shapes of unreadable receipt crashed `status` and `tick` instead
+of reading as stale.
+
+**A measurement changed the plan.** The decision taken first (D13) was to record each artifact's
+identity — device, inode, size, mtime, ctime — and skip the hash whenever it was unchanged.
+Building it produced two numbers that refuted the premise, so the owner narrowed it to D14:
+
+- hashing every artifact of this plan costs **0.19 ms** per pass; stat-ing them costs **0.16 ms**.
+  The saving is 0.03 ms a tick, because artifacts are small text files and the cost is the syscall.
+- this filesystem's mtime granularity is ~4 ms: **193 of 200** back-to-back same-size rewrites
+  shared one `mtime_ns`. Device, inode and size are unchanged too, so the receipt would have read
+  fresh on a rewritten file — the one thing the check exists to catch.
+
+So: **every artifact that can be hashed still is, on every check.** `artifact_ids` is recorded for
+all of them and consulted only where there is no hash to compare — an artifact over 4 GiB. Those
+are now watched; they were not before. Identities are compared for **equality only**, never
+ordered: this box's wall clock steps backwards, so a recorded stamp in the future and one in the
+past are both simply different.
+
+**Nothing inside a receipt decides its own verdict.** `{"stale": True, **r}` let a `"stale": false`
+key in RECEIPT.json overwrite the reading the check had just reached. The spread order was the whole
+bug; it is `{**r, "stale": True, …}` now, in all three places.
+
+**`Plan.receipt` cannot crash a tick.** It runs for every task on every `status` and `tick`, so one
+bad file must not stall the rest. Unreadable, not a JSON object, larger than a receipt can be
+(1 MiB, checked *before* the read), invalid UTF-8, nested past the recursion limit, or an
+`artifacts` that is not an object: all read as stale.
+
+**A regular file that states size 0 is not necessarily empty.** Every file under `/proc` is one, and
+`st_size` is the only bound available before reading. `file_sha` now gives those reads their own,
+smaller ceiling and names the refusal (`reports size 0 but keeps reading`) instead of following the
+file. The grow-while-reading branch has a check for both ceilings.
+
+`test-continuity.py`: 241 checks (was 200). Seven mutations, each caught.
+
 ## Unreleased — the hashing closes the second review's findings · 2026-09-17
 
 The adversarial review of `12b63ef` and `60e3cee` (T20 in the suite-timing plan) upheld 30 of 39

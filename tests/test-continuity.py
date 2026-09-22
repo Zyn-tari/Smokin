@@ -938,6 +938,255 @@ for q in (LAB / "stamped-findings", LAB / "stamped-nofindings"):
             break
         time.sleep(0.1)
 
+print("\n=== D14 · a hashable artifact is always hashed; identity watches only what cannot be ===")
+# WHY THIS SHAPE. D13 was going to skip the hash whenever an artifact's identity
+# — device, inode, size, mtime, ctime — was unchanged. Measured here, that saves
+# 0.03 ms a tick (artifacts are small text files, so the cost is the syscall,
+# not the hashing) and it is not sound: this filesystem's mtime granularity is
+# ~4 ms, and 193 of 200 back-to-back same-size rewrites share one mtime_ns. So
+# the identity is recorded for every artifact and consulted for exactly one
+# thing: an artifact with no hash because it was too large to hash. Those were
+# watched by nothing at all before.
+D = S.D
+_real_file_sha = D.file_sha
+hashed = []
+
+
+def counting_file_sha(path, *a, **kw):
+    hashed.append(str(path))
+    return _real_file_sha(path, *a, **kw)
+
+
+def counted(fn):
+    """Run fn with file_sha counted, and return (result, paths hashed)."""
+    hashed.clear()
+    D.file_sha = counting_file_sha
+    try:
+        return fn(), list(hashed)
+    finally:
+        D.file_sha = _real_file_sha
+
+
+def receipt_with_ids(name, body, mutate=None):
+    """A plan with one task, one artifact, and a receipt recording both the
+    artifact's hash and its identity — what the emitter now writes."""
+    q = mkplan(name, [dict(tid="T1", owner="worker-T1")])
+    f = q / "tasks" / "T1" / "FINDINGS.md"
+    f.write_text(body)
+    r = {"schema": "smokin.receipt/1", "task": "T1", "claim": "done",
+         "artifacts": {"FINDINGS.md": D.file_sha(f, empty_is_none=False)},
+         "artifact_ids": {"FINDINGS.md": D.file_id(f)}}
+    if mutate:
+        mutate(r, f)
+    (q / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(r))
+    return q, f
+
+
+# THE MEASUREMENT THE DECISION RESTS ON, asserted rather than remembered: two
+# same-size rewrites in a row usually share one stamp, so an unchanged identity
+# cannot stand in for an unchanged file.
+shared = 0
+probe = LAB / "granularity-probe"
+for _ in range(50):
+    probe.write_text("ab")
+    a = D.file_id(probe)
+    probe.write_text("cd")
+    if D.same_id(a, D.file_id(probe)):
+        shared += 1
+chk("same-size rewrites can share one identity, so identity cannot replace the hash",
+    shared > 0, True)
+
+q, f = receipt_with_ids("id-fresh", "unchanged\n")
+got, did = counted(lambda: S.Plan(q).receipt("T1"))
+chk("an unchanged artifact reads as fresh", got.get("stale"), None)
+chk("...and it was hashed to say so, identity or no identity", len(did), 1)
+
+q, f = receipt_with_ids("id-samesize", "before\n")
+f.write_text("aft3r\n")                      # same length, likely the same mtime
+chk("a same-size rewrite is caught, which identity alone would miss",
+    S.Plan(q).receipt("T1").get("stale"), True)
+
+q, f = receipt_with_ids("id-changed", "before\n")
+f.write_text("after it grew\n")
+got = S.Plan(q).receipt("T1")
+chk("a rewritten artifact is stale", got.get("stale"), True)
+has("...and the reason names it", got.get("why"), "FINDINGS.md")
+
+q, f = receipt_with_ids("id-gone", "here\n")
+f.unlink()
+chk("a deleted artifact is stale", S.Plan(q).receipt("T1").get("stale"), True)
+
+q, f = receipt_with_ids("id-fifo", "here\n")
+f.unlink()
+os.mkfifo(f)
+chk("an artifact replaced by a FIFO is stale, and does not hang",
+    S.Plan(q).receipt("T1").get("stale"), True)
+
+# A RECEIPT FROM BEFORE THIS CHANGE is unaffected: there was never anything but
+# the hash, and there still is not.
+q, f = receipt_with_ids("id-older", "old emitter\n",
+                        mutate=lambda r, f: r.pop("artifact_ids"))
+got, did = counted(lambda: S.Plan(q).receipt("T1"))
+chk("a receipt with no artifact_ids reads as fresh", got.get("stale"), None)
+chk("...by hashing, exactly as before", len(did), 1)
+f.write_text("changed\n")
+chk("...and still notices a change", S.Plan(q).receipt("T1").get("stale"), True)
+
+# THE ONE THING IDENTITY IS FOR. Sparse, so this costs no disk: the point is
+# the stated size, which is what file_sha refuses on.
+q = mkplan("id-huge", [dict(tid="T1", owner="worker-T1")])
+big = q / "tasks" / "T1" / "FINDINGS.md"
+with open(big, "wb") as fh:
+    fh.truncate((4 << 30) + 1)
+r = {"schema": "smokin.receipt/1", "task": "T1", "claim": "done",
+     "artifacts": {"FINDINGS.md": None},
+     "artifact_ids": {"FINDINGS.md": D.file_id(big)}}
+(q / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(r))
+chk("an artifact over 4 GiB has no hash to record",
+    D.file_sha(big, empty_is_none=False), "unhashable: larger than 4 GiB")
+got, did = counted(lambda: S.Plan(q).receipt("T1"))
+chk("an artifact too large to hash is watched by identity", got.get("stale"), None)
+chk("...without being read", did, [])
+# The sleep is the ~4 ms granule again, and it is the honest thing to write:
+# identity cannot see a write that lands in the same granule as the one it
+# recorded. For a file this size that window is not a real hazard — the
+# decision note says why — but a test must not pretend it is not there.
+time.sleep(0.05)
+with open(big, "r+b") as fh:
+    fh.write(b"x")
+chk("...and one byte written into it is stale",
+    S.Plan(q).receipt("T1").get("stale"), True)
+big.unlink()
+
+# THE CONTROL for that: with no identity recorded, an artifact too large to hash
+# is watched by nothing — which is the hole D14 keeps closed.
+q = mkplan("id-huge-noids", [dict(tid="T1", owner="worker-T1")])
+big = q / "tasks" / "T1" / "FINDINGS.md"
+with open(big, "wb") as fh:
+    fh.truncate((4 << 30) + 1)
+(q / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(
+    {"task": "T1", "artifacts": {"FINDINGS.md": None}}))
+with open(big, "r+b") as fh:
+    fh.write(b"x")
+chk("...and without an identity there is nothing watching it at all",
+    S.Plan(q).receipt("T1").get("stale"), None)
+big.unlink()
+
+# IDENTITIES ARE COMPARED FOR EQUALITY, NEVER ORDERED. This machine's wall clock
+# steps backwards every few minutes, so a recorded mtime in the FUTURE relative
+# to the file must read as a difference, not as a newer file.
+q = mkplan("id-future", [dict(tid="T1", owner="worker-T1")])
+big = q / "tasks" / "T1" / "FINDINGS.md"
+with open(big, "wb") as fh:
+    fh.truncate((4 << 30) + 1)
+ident = dict(D.file_id(big))
+ident["mtime_ns"] += 10 ** 12
+(q / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(
+    {"task": "T1", "artifacts": {"FINDINGS.md": None},
+     "artifact_ids": {"FINDINGS.md": ident}}))
+chk("a recorded mtime in the future is a difference, not a newer file",
+    S.Plan(q).receipt("T1").get("stale"), True)
+ident["mtime_ns"] -= 2 * 10 ** 12
+(q / "tasks" / "T1" / "RECEIPT.json").write_text(json.dumps(
+    {"task": "T1", "artifacts": {"FINDINGS.md": None},
+     "artifact_ids": {"FINDINGS.md": ident}}))
+chk("...and so is one in the past", S.Plan(q).receipt("T1").get("stale"), True)
+chk("an identity missing a field is a difference, not a partial match",
+    D.same_id({k: v for k, v in D.file_id(big).items() if k != "ctime_ns"},
+              D.file_id(big)), False)
+big.unlink()
+
+print("\n=== D14 · what is in the receipt cannot decide the receipt ===")
+# `{"stale": True, **r}` let a key inside RECEIPT.json overwrite the verdict
+# the check had just reached. The spread order is the whole bug.
+q, f = receipt_with_ids("rcpt-override", "x\n",
+                        mutate=lambda r, _f: r.update(stale=False, why="all good"))
+f.write_text("a different length\n")
+got = S.Plan(q).receipt("T1")
+chk("a 'stale' key in the receipt cannot claim freshness", got.get("stale"), True)
+hasnt("...nor supply the reason", got.get("why"), "all good")
+
+print("\n=== D14 · a receipt that cannot be read is stale, never a crash ===")
+
+
+def receipt_says(name, write):
+    q = mkplan(name, [dict(tid="T1", owner="worker-T1")])
+    write(q / "tasks" / "T1" / "RECEIPT.json")
+    try:
+        return S.Plan(q).receipt("T1"), None
+    except Exception as e:                       # noqa: BLE001 — that is the check
+        return None, f"{e.__class__.__name__}: {e}"
+
+
+for label, write in (
+    ("a receipt that is a JSON array", lambda p: p.write_text("[1, 2]")),
+    ("a receipt that is a bare number", lambda p: p.write_text("42")),
+    ("a receipt whose artifacts is a list",
+     lambda p: p.write_text(json.dumps({"artifacts": ["FINDINGS.md"]}))),
+    ("a receipt whose artifacts is a string",
+     lambda p: p.write_text(json.dumps({"artifacts": "FINDINGS.md"}))),
+    ("a receipt of invalid UTF-8", lambda p: p.write_bytes(b'{"a": "\xff\xfe"}')),
+    ("a receipt nested past the recursion limit",
+     lambda p: p.write_text("[" * 200000 + "]" * 200000)),
+    ("a receipt larger than a receipt can be",
+     lambda p: p.write_text('{"artifacts": {}, "pad": "' + "x" * (1 << 21) + '"}')),
+    ("a receipt nobody may read", lambda p: (p.write_text("{}"), p.chmod(0))),
+):
+    got, crash = receipt_says(label.replace(" ", "-")[:40], write)
+    chk(f"{label} reads as stale", (crash, (got or {}).get("stale")), (None, True))
+
+print("\n=== D14 · a file that states size 0 is read, but not followed ===")
+# EVERY FILE UNDER /proc IS A REGULAR FILE OF STATED SIZE 0 that yields content
+# when read. st_size is the only bound available before reading, so when it
+# says 0 the read gets its own, smaller ceiling. Lowered here so the refusal is
+# reached deterministically rather than after a megabyte.
+PROC = "/proc/self/maps"
+chk("a procfs file states size 0", os.stat(PROC).st_size, 0)
+chk("...and hashes fine when it fits", D.file_sha(PROC, empty_is_none=False)[:7], "sha256:")
+_zmax, _max = D._ZERO_SIZED_MAX, D.MAX_BYTES
+try:
+    D._ZERO_SIZED_MAX = 1024
+    chk("a size-0 file that keeps reading is refused, not followed",
+        D.file_sha(PROC, empty_is_none=False),
+        "unhashable: reports size 0 but keeps reading")
+    # The same branch with the 4 GiB ceiling in force: the grow-while-reading
+    # refusal, which st_size alone can never catch.
+    D.MAX_BYTES = D._ZERO_SIZED_MAX = 1024
+    chk("a file that grows past the ceiling while being read is refused",
+        D.file_sha(PROC, empty_is_none=False), "unhashable: larger than 4 GiB")
+finally:
+    D._ZERO_SIZED_MAX, D.MAX_BYTES = _zmax, _max
+chk("...and the ceilings are back", (D._ZERO_SIZED_MAX, D.MAX_BYTES), (1 << 20, 4 << 30))
+empty = LAB / "truly-empty"
+empty.write_text("")
+chk("a really empty file is still empty, not 'keeps reading'",
+    D.file_sha(empty, empty_is_none=False), D.EMPTY_SHA)
+
+print("\n=== D14 · the emitter records what it saw ===")
+q = mkplan("emit-ids", [dict(tid="T1", owner="worker-T1")])
+(q / "tasks" / "T1" / "FINDINGS.md").write_text("emitted\n")
+(q / ".smokin" / "dispatch" / "T1.json").write_text(json.dumps({
+    "task": "T1", "seq": "rIDS:T1:1", "run": "rIDS", "attempt": 1, "runtime": "demo",
+    "dispatch": "inproc", "placement": "inproc", "started": "2026-01-01T00:00:00Z",
+    "started_ns": 1, "started_epoch": time.time(), "budget_s": 60,
+    "findings_before": None, **CL.stamp()}))
+subprocess.run([str(ROOT / "bin" / "smokin-emit"), "T1", "ids-test"],
+               input='{"terminal":"ok","exit":0}', text=True, capture_output=True,
+               timeout=20, env=dict(os.environ, SMOKIN_PLAN=str(q)))
+r = json.loads((q / "tasks" / "T1" / "RECEIPT.json").read_text())
+chk("the emitter records an identity for each artifact",
+    sorted(r.get("artifact_ids", {})), ["CHANGES.md", "FINDINGS.md", "QUESTIONS.md"])
+chk("...with the five fields identity is made of",
+    sorted(r["artifact_ids"]["FINDINGS.md"] or {}),
+    ["ctime_ns", "dev", "ino", "mtime_ns", "size"])
+chk("...and null for an artifact that was never written",
+    r["artifact_ids"]["CHANGES.md"], None)
+chk("...beside the hash, not instead of it",
+    (r["artifacts"]["FINDINGS.md"] or "")[:7], "sha256:")
+chk("a receipt the emitter wrote reads as fresh", S.Plan(q).receipt("T1").get("stale"), None)
+(q / "tasks" / "T1" / "FINDINGS.md").write_text("emitted\n" * 2)
+chk("...and stale once the artifact changes", S.Plan(q).receipt("T1").get("stale"), True)
+
 print()
 if fails:
     print(f"\033[31m{fails} failed\033[0m")

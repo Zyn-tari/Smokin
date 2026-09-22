@@ -57,6 +57,7 @@ def log(plan: Path, **kw):
 
 
 _SHA_CACHE = {}
+_ID_CACHE = {}
 
 
 def sha(p: Path):
@@ -71,6 +72,17 @@ def sha(p: Path):
         v = D.file_sha(p, empty_is_none=False)
         _SHA_CACHE[key] = v if D.is_hash(v) else None
     return _SHA_CACHE[key]
+
+
+def fid(p: Path):
+    """The artifact's identity, or None. Recorded BESIDE the hash, not instead
+    of it: a receipt written by this emitter can be checked by a reader that
+    knows nothing about identities, and one over 4 GiB — which has no hash at
+    all — is still watched, by identity alone."""
+    key = str(p)
+    if key not in _ID_CACHE:
+        _ID_CACHE[key] = D.file_id(p)
+    return _ID_CACHE[key]
 
 
 # The worker's own **Status:** in TASK.md, upper-cased, "" if unreadable. Same
@@ -266,6 +278,10 @@ def main() -> int:
         "result": result,
         "artifacts": {n: sha(tdir / n) for n in
                       ("FINDINGS.md", "CHANGES.md", "QUESTIONS.md")},
+        # ADDITIVE, like `usage` below — the schema stays smokin.receipt/1.
+        # A reader that does not know this key compares hashes as before.
+        "artifact_ids": {n: fid(tdir / n) for n in
+                         ("FINDINGS.md", "CHANGES.md", "QUESTIONS.md")},
         "transcript": str((priv / "transcript.log").relative_to(plan)),
     }
     # OPTIONAL, and the schema stays smokin.receipt/1. Bumping to /2 for a
