@@ -38,7 +38,7 @@ existed to catch. A tier-1 breach stopped halting and every file involved still 
 baseline's run id is now checked directly, because the first version of that check asserted the
 file existed and the mutant sailed past it.
 
-`tests/test-readonly-commands.py`, new: 35 checks, registered in `run-tests.sh`. Nine mutations,
+`tests/test-readonly-commands.py`, new: 36 checks, registered in `run-tests.sh`. Nine mutations,
 each caught. Full suite 45 passed, 0 failed.
 
 ## Unreleased — `reset --run <id>` means that run · 2026-09-22
