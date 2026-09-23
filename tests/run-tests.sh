@@ -377,6 +377,20 @@ else
   cat "$LAB/resetscope.out"
 fi
 
+# A SET NAMED READ_ONLY THAT WRITES. Five of its six members created `.smokin/`
+# because run_id() minted and SAVED a run just to print it, so asking about a
+# plan you could not write raised PermissionError and `status` exited 1 — the
+# code the update policy reserves for "work is in flight". The control is the
+# one that matters: on a plan it CAN write, a question must still write
+# nothing, and the three commands whose product IS a file must still make it.
+if python3 "$ROOT/tests/test-readonly-commands.py" > "$LAB/readonly.out" 2>&1; then
+  n=$(count_pass "$LAB/readonly.out")
+  ok "read-only commands: $n checks on asking without changing"
+else
+  bad "read-only commands" "see below"
+  cat "$LAB/readonly.out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 rm -rf "$LAB"

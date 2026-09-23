@@ -368,6 +368,28 @@ filters on the run id, so the next run starts empty and rebuilds its own.
 that quietly starts accumulating a store on somebody's disk the first time they try it is not
 read-only in the sense that made them try it.
 
+**Which commands write, stated rather than assumed.** One set used to answer two questions and was
+named for a property it did not have: five of the six members of `READ_ONLY` wrote, because
+`run_id()` minted and *saved* a run id just to print one. Asking about a plan the caller could not
+write raised `PermissionError`, uncaught — and `status` exited **1**, the code the update policy
+reserves for *work is in flight, do not upgrade*, so the crash read as "wait". (QA sweep
+2026-09-22, D17.) There are now two sets, and they mean different things:
+
+| | what it means |
+|---|---|
+| `LONE_TASK_OK` | may be run against a single `TASK.md` with no plan around it. Says nothing about writing — this was the original meaning of the old name |
+| `WRITES_NOTHING` | `status`, `invariants`, `memory`. Asking a question changes nothing, on any plan, writable or not |
+
+`verify`, `present` and `doctor` are deliberately outside `WRITES_NOTHING`, because **a file is
+what each of them produces**: a verdict, the re-rendered human surface, and §3g's committed
+environment record. Making them write-free would not make them honest, it would delete them. What
+they owe instead is never to crash: on a plan they cannot write they re-run, re-render and re-probe
+exactly as usual, print the answer, record nothing, and say once that they could not.
+
+`status` losing its writes is a behaviour change on purpose. It used to refresh `PROGRESS.md` and
+`STATUS.json` as a side effect of being asked; `present` and `tick` re-render, and asking is not
+one of them.
+
 **The honest limits**, here rather than in a footnote:
 
 - **Nothing verifies that the command is the command that produced the observation, or that it is

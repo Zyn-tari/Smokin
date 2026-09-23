@@ -2,7 +2,8 @@
 """
 smokin — an idempotent tick that dispatches a Grillin plan from disk.
 
-    smokin doctor            probe the machine, write .smokin/doctor.json
+    smokin doctor            probe the machine, write .smokin/doctor.json (printed
+                             either way — a plan you cannot write is still probed)
     smokin verify            run every task's own done-command. Starts nothing
     smokin tick              one pass: reap, gate, judge, dispatch, render
     smokin run               tick until there is nothing a runtime may do next
@@ -265,6 +266,32 @@ PANE_CEILING = {"XS": 0, "S": 1, "M": 3, "L": 5, "XL": 5}
 # be what a subscription-billed budget wants — the correct behaviour for git and
 # the affordable one are the same behaviour.
 AGENTS_IN_FLIGHT_DEFAULT = 1
+# TWO DIFFERENT QUESTIONS, and one set used to answer both — which is how it
+# ended up named for a property it did not have (QA sweep 2026-09-22, D17).
+#
+# LONE_TASK_OK is the original meaning: what may be run against a single
+# TASK.md with no plan around it. It says nothing about writing.
+#
+# WRITES_NOTHING is the contract the old name claimed: a command that asks a
+# question and changes nothing to answer it. Every one of these used to create
+# `.smokin/`, because `run_id()` invented and saved a run just to print it — so
+# asking about a plan you could not write crashed with a PermissionError
+# traceback, and `status` exited 1, the one code the update policy reserves for
+# "work is in flight, do not upgrade".
+#
+# `verify`, `present` and `doctor` are deliberately NOT in WRITES_NOTHING, and
+# for one reason: a file is what each of them PRODUCES. A verdict is verify's
+# answer; re-rendering PROGRESS.md is literally what `present` is for; and
+# `.smokin/doctor.json` is the committed environment record DESIGN §3g calls
+# for, which another harness reads. Making those write-free would not make them
+# honest, it would delete them. What they owe instead is never to CRASH on a
+# plan they cannot write: they report, and do not record, and say so.
+#
+# `status` IS in the set, and that is a behaviour change: it used to refresh
+# PROGRESS.md and STATUS.json as a side effect of being asked. Asking must not
+# change the thing asked about; `present` and `tick` re-render.
+LONE_TASK_OK = frozenset({"verify", "doctor", "status", "present", "invariants", "memory"})
+WRITES_NOTHING = frozenset({"status", "invariants", "memory"})
 # A RECEIPT IS A SMALL JSON OBJECT. Anything past this is not one, and reading
 # it whole on every tick is the hazard smokin_digest exists to avoid — so the
 # size is checked before the read, not after.
@@ -417,7 +444,10 @@ class Task:
 
 
 class Plan:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, readonly: bool = False):
+        # READ-ONLY IS A PROPERTY OF THE PLAN, not of each call site: every
+        # re-read rebuilds this object in place and would otherwise drop it.
+        self.readonly = readonly
         self.root = root
         self.priv = root / ".smokin"
         self.tasks = {}
@@ -461,14 +491,37 @@ class Plan:
         return "XS" if n < 4 else "S" if n <= 10 else "M" if n <= 25 else "L" if n <= 60 else "XL"
 
     def run_id(self):
+        """This run's id, or None when nothing has run and we may not say so.
+
+        ASKING MUST NOT START ANYTHING. A read-only command that reached here on
+        a plan with no `run.json` used to mint an id and save it — inventing a
+        run as a side effect of being asked a question, and creating `.smokin/`
+        to do it. On a plan the caller cannot write that raised. `None` is the
+        honest answer to "which run is this" before any run exists."""
         f = self.priv / "run.json"
-        if f.is_file():
-            return json.loads(f.read_text())["run"]
+        try:
+            if f.is_file():
+                return json.loads(f.read_text())["run"]
+        except (OSError, ValueError, KeyError):
+            return None                   # unreadable is not a run id either
+        if self.readonly:
+            return None
         self.priv.mkdir(parents=True, exist_ok=True)
         rid = "r" + hashlib.sha256(f"{self.root}{time.time_ns()}".encode()).hexdigest()[:6]
         (self.priv / "run.json").write_text(json.dumps(
             {"run": rid, "started": now(), "plan_root": str(self.root)}, indent=1) + "\n")
         return rid
+
+    def can_write(self) -> bool:
+        """Could this process create `.smokin/` and write inside it? Never
+        raises. Asked once, up front, so a command that cannot record its work
+        says so rather than discovering it halfway through a traceback."""
+        try:
+            if self.priv.is_dir():
+                return os.access(self.priv, os.W_OK | os.X_OK)
+            return os.access(self.root, os.W_OK | os.X_OK)
+        except OSError:
+            return False
 
     def task_dir(self, tid) -> Path:
         """Where a task's artefacts live.
@@ -740,6 +793,14 @@ def now():
 
 
 def ledger(plan: Plan, **kw):
+    """Append one line to the run ledger. A no-op on a read-only plan.
+
+    THE LEDGER IS A RECORD OF WHAT HAPPENED HERE, and on a plan this process
+    may not write, nothing is happening here — the caller is asking a question.
+    Writing was unconditional, so it raised PermissionError out of `verify` on
+    an unwritable plan (D17)."""
+    if plan.readonly:
+        return
     kw["at"] = now()
     plan.priv.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(plan.priv / "ledger.jsonl"),
@@ -1896,7 +1957,10 @@ def take_verdict(plan: Plan, tid: str, write_status: bool = True,
              "cmd": t.done_cmd, "at": now(),
              "why": "gate could not run (exit %d)" % r.returncode if blew else None,
              "stdout": (r.stdout or "")[-500:], "stderr": (r.stderr or "")[-500:]}
-    (t.dir / "VERDICT.json").write_text(json.dumps(v, indent=1) + "\n")
+    # A plan that cannot be written still gets its answer printed; there is
+    # simply nowhere to put it. verify() says so once, up front.
+    if not plan.readonly:
+        (t.dir / "VERDICT.json").write_text(json.dumps(v, indent=1) + "\n")
     # `verify` passes write_status=False. At n=1 the human wrote TASK.md and
     # probably has it open; silent edits to someone's own prose are hostile, and
     # the rendered picture does not need it — Plan.state() reads the verdict
@@ -2107,14 +2171,29 @@ def verify(plan: Plan, only=None):
 
     At n=1 there is no worker to emit a receipt. YOU are the receipt, and this is
     the second hand.
+
+    VERIFY IS NOT WRITE-FREE, AND CANNOT BE: a VERDICT.json is what it
+    PRODUCES. What it must not do is crash on a plan it cannot write — that was
+    a PermissionError traceback and exit 1, and 1 is the code the update policy
+    reserves for "work is in flight" (D17, 2026-09-22). On an unwritable plan
+    it still re-runs every done-command and still tells you the answer; it
+    simply cannot record it, and says so once. The lock goes with the writing:
+    there is no tick to race that could not also write here.
     """
-    plan.priv.mkdir(parents=True, exist_ok=True)
-    lock = open(plan.priv / "tick.lock", "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("another tick holds the lock — nothing to do")
-        return 0
+    recording = plan.can_write()
+    lock = None
+    if recording:
+        plan.priv.mkdir(parents=True, exist_ok=True)
+        lock = open(plan.priv / "tick.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("another tick holds the lock — nothing to do")
+            return 0
+    else:
+        plan.readonly = True
+        print(f"smokin: {plan.root} cannot be written — verdicts are reported, "
+              f"not recorded", file=sys.stderr)
 
     held = halted(plan)
     if held:
@@ -2144,7 +2223,7 @@ def verify(plan: Plan, only=None):
         verdicted.append(tid)
         print(f"  verdict  {tid}  {label_verdict(plan, tid, v)}")
 
-    plan.__init__(plan.root)
+    plan.__init__(plan.root, plan.readonly)
 
     # Independence cannot be established from here, so say so rather than let a
     # green line imply it. The gate checks the declaration; only something that
@@ -2300,7 +2379,7 @@ def wait(plan: Plan, tid=None, timeout=0.0, poll=1.0, quiet=False, since=None):
     deadline = (time.monotonic() + timeout) if timeout else None
     before = plan_pulse(plan)
     while True:
-        plan.__init__(plan.root)
+        plan.__init__(plan.root, plan.readonly)
         if halted(plan):
             if not quiet:
                 print_halt(halted(plan))
@@ -2367,10 +2446,10 @@ def tick(plan: Plan, dry=False, close_panes=False):
         if tid in plan.tasks and not plan.verdict(tid):
             verdicts[tid] = take_verdict(plan, tid)
 
-    plan.__init__(plan.root)                     # re-read: statuses changed
+    plan.__init__(plan.root, plan.readonly)                     # re-read: statuses changed
 
     rulings, why = judge_pass(plan, rts, dry=dry)
-    plan.__init__(plan.root)                     # re-read: rulings changed states
+    plan.__init__(plan.root, plan.readonly)                     # re-read: rulings changed states
     if why:
         rec = halt(plan, why, task=None)
         st = render_status(plan, reaped, list(verdicts), [], [], rulings, rec, inv_rows)
@@ -2521,7 +2600,7 @@ def tick(plan: Plan, dry=False, close_panes=False):
                       f"{ru.get('class')}, "
                       f"{ru.get('fallback') or ru.get('why')}")
 
-    plan.__init__(plan.root)
+    plan.__init__(plan.root, plan.readonly)
     st = render_status(plan, reaped, list(verdicts), dispatched, queued, rulings, None, inv_rows)
     write_progress(plan, st)
 
@@ -2710,7 +2789,11 @@ def render_status(plan: Plan, reaped, verdicted, dispatched, queued,
                         "queued": [q[0] for q in queued],
                         "ruled": [f"{r.get('task')}/{r.get('class')}={r.get('outcome')}"
                                   for r in rulings]}}
-    (plan.root / "STATUS.json").write_text(json.dumps(st, indent=1) + "\n")
+    # A QUESTION LEAVES NO TRACE (D17). `status` and `present` build exactly the
+    # same object; what they must not do is save it to a plan they were only
+    # asked to read.
+    if not plan.readonly:
+        (plan.root / "STATUS.json").write_text(json.dumps(st, indent=1) + "\n")
     return st
 
 
@@ -2722,7 +2805,9 @@ def bar(done, total, width=28):
 
 
 def write_progress(plan: Plan, st: dict):
-    """PROGRESS.md — the human surface. Reads only `st`."""
+    """PROGRESS.md — the human surface. Reads only `st`.
+
+    Returns the rendered text, and writes it unless the plan is read-only."""
     L, c, tot = [], st["counts"], st["total"]
     ver = c.get("verified", 0)
     L.append("# Where the plan is")
@@ -2920,7 +3005,10 @@ def write_progress(plan: Plan, st: dict):
              "gate re-run by the tick; a ruling is a judgement by someone who did not write the "
              "work. Everything here is derived from files in this directory — delete every agent "
              "and re-run `smokin tick` and the same picture comes back.")
-    (plan.root / "PROGRESS.md").write_text("\n".join(L) + "\n")
+    text = "\n".join(L) + "\n"
+    if not plan.readonly:
+        (plan.root / "PROGRESS.md").write_text(text)
+    return text
 
 
 # ── doctor ──────────────────────────────────────────────────────────────────
@@ -3020,8 +3108,16 @@ def doctor(plan: Plan, fix: bool = False):
     except OSError:
         pass
     out["host"]["debrief_hook"] = _debrief_hook_wired(plan)
-    plan.priv.mkdir(parents=True, exist_ok=True)
-    (plan.priv / "doctor.json").write_text(json.dumps(out, indent=1) + "\n")
+    # THE REPORT IS PRINTED EITHER WAY, and recorded when there is somewhere to
+    # record it. `doctor.json` is DESIGN §3g's committed environment record, so
+    # dropping it would not make doctor honest — it would delete it. Asking a
+    # plan you cannot write still gets you the answer (D17).
+    if plan.can_write():
+        plan.priv.mkdir(parents=True, exist_ok=True)
+        (plan.priv / "doctor.json").write_text(json.dumps(out, indent=1) + "\n")
+    else:
+        print(f"smokin: {plan.root} cannot be written — probed, not recorded",
+              file=sys.stderr)
     print(f"host      sh={out['host']['sh']}  herdr={'yes' if out['host']['herdr'] else 'no'}"
           f"  inside={'yes' if out['host']['inside_herdr'] else 'no'}")
     print(f"          filesystem: {out['host']['fs_note']}")
@@ -3589,16 +3685,23 @@ def main():
         print(f"smokin: {root} has neither tasks/ nor a TASK.md — nothing to work with",
               file=sys.stderr)
         return 2
-    plan = Plan(root)
+    # ONE COMMAND IN THE SET PRODUCES SOMETHING IN ONE MODE. `invariants`
+    # answers a question; `invariants --recapture` takes a baseline
+    # deliberately and on the record, which is the opposite of asking. Marking
+    # it read-only silently disabled it — the baseline was never written, so a
+    # later tick had nothing to compare against and a tier-1 breach stopped
+    # halting. The suite caught that, which is the only reason this comment is
+    # here rather than in a later adversary's report.
+    produces = a.cmd == "invariants" and a.recapture
+    plan = Plan(root, readonly=(a.cmd in WRITES_NOTHING and not produces))
 
     # A lone task can be CHECKED but not RUN. Dispatching out of a directory with
     # no plan around it is how you get a fleet nobody can resume — the thing the
     # plan directory exists to prevent. Say which commands apply rather than
     # failing with a stack trace or, worse, quietly doing it.
-    READ_ONLY = {"verify", "doctor", "status", "present", "invariants", "memory"}
-    if getattr(plan, "single", False) and a.cmd not in READ_ONLY:
+    if getattr(plan, "single", False) and a.cmd not in LONE_TASK_OK:
         print(f"smokin: {root} is a single task, not a plan — `{a.cmd}` needs a plan "
-              f"directory with tasks/. Available here: {', '.join(sorted(READ_ONLY))}.",
+              f"directory with tasks/. Available here: {', '.join(sorted(LONE_TASK_OK))}.",
               file=sys.stderr)
         return 2
 
@@ -3625,10 +3728,18 @@ def main():
         print(f"reaped {len(got)}: {', '.join(got) or '—'}")
         return 0
     if a.cmd in ("status", "present"):
-        st = render_status(plan, [], [], [], [], (), halted(plan))
-        write_progress(plan, st)
+        # `present` re-renders PROGRESS.md — that is its whole job — so it
+        # writes whenever it can, and merely prints when it cannot (D17).
         if a.cmd == "present":
-            print((root / "PROGRESS.md").read_text())
+            plan.readonly = not plan.can_write()
+        st = render_status(plan, [], [], [], [], (), halted(plan))
+        # RENDERED, NOT READ BACK. `present` used to re-render the file and then
+        # read it in again; on a plan it cannot write there is no file to read,
+        # and the round trip bought nothing. It prints what it just rendered,
+        # and still writes PROGRESS.md on a plan it may write.
+        rendered = write_progress(plan, st)
+        if a.cmd == "present":
+            print(rendered)
             return 0
         c = st["counts"]
         inflight_n = (c.get("running", 0) + c.get("claimed", 0) + c.get("judging", 0))

@@ -218,7 +218,7 @@ verdict  T3  REFUTED
 | | |
 |---|---|
 | `smokin verify <plan>` | **start here.** Re-run every task's own done-command. Starts nothing, edits no `TASK.md`, spends no model calls |
-| `smokin doctor <plan>` | probe every declared runtime, the filesystem and the shell; write `.smokin/doctor.json` |
+| `smokin doctor <plan>` | probe every declared runtime, the filesystem and the shell; write `.smokin/doctor.json`, or say so and print the probe when the plan cannot be written |
 | `smokin tick <plan>` | one pass: reap · gate · **judge** · dispatch · render. **Safe to run at any time, from anywhere** |
 | `smokin run <plan>` | tick until there is nothing a runtime may do next. Start it and walk away |
 | `smokin wait <plan> --task T1` | block until `T1` settles. What operators were writing a `wait-for-agent.sh` for |

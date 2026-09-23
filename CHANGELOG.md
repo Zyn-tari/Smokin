@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased — a set named READ_ONLY that wrote · 2026-09-23
+
+Five of the six commands `bin/smokin` listed in `READ_ONLY` wrote to the plan. All of them reached
+`Plan.run_id()`, which minted a run id and **saved** it — inventing a run as a side effect of being
+asked a question, and creating `.smokin/` to do it. On a plan the caller could not write that
+raised `PermissionError`, uncaught, and `status` exited **1** — the one code the update policy
+reserves for "work is in flight, do not upgrade", so the crash read as *wait*. Grillin's gate reads
+the same plan and returns a clean verdict. (QA sweep 2026-09-22, D17.)
+
+**One name was doing two jobs**, which is how it ended up describing a property it did not have:
+
+| | what it means |
+|---|---|
+| `LONE_TASK_OK` | may run against a single `TASK.md` with no plan around it. The original meaning; says nothing about writing |
+| `WRITES_NOTHING` | `status`, `invariants`, `memory`. Asking changes nothing, on any plan |
+
+**`run_id()` no longer invents a run.** On a read-only plan with no `run.json` it returns `None` —
+the honest answer to "which run is this" before any run exists — and an unreadable `run.json` is
+not a run id either. `ledger()` is a no-op on a read-only plan: the ledger records what happened
+here, and nothing is happening here.
+
+**`status` no longer writes**, and that is a behaviour change on purpose: it used to refresh
+`PROGRESS.md` and `STATUS.json` as a side effect of being asked. `present` and `tick` re-render.
+
+**Three commands stay outside the contract, because a file is what they produce** — a verdict, the
+re-rendered human surface, §3g's committed environment record. Making them write-free would delete
+them, not make them honest. What they owe instead is never to crash: on a plan they cannot write
+they re-run, re-render and re-probe as usual, print the answer, record nothing, and say once that
+they could not. `present` no longer reads `PROGRESS.md` back after rendering it, so it works where
+there is no file to read.
+
+**The suite caught the one that mattered.** Marking `invariants` read-only silently disabled
+`invariants --recapture`: `run_id()` returned `None`, the baseline was stamped `run: null`, the
+next tick saw a mismatch and **re-captured** — taking the "before" reading *after* the change it
+existed to catch. A tier-1 breach stopped halting and every file involved still existed. The
+baseline's run id is now checked directly, because the first version of that check asserted the
+file existed and the mutant sailed past it.
+
+`tests/test-readonly-commands.py`, new: 35 checks, registered in `run-tests.sh`. Nine mutations,
+each caught. Full suite 45 passed, 0 failed.
+
 ## Unreleased — `reset --run <id>` means that run · 2026-09-22
 
 A QA sweep found the one defect in either tool that destroys work (D16).
